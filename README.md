@@ -96,6 +96,13 @@ Combines syntax parsing and semantic validation with several code optimizations:
 2. Run `make` to build the compiler
 3. Use `make clean` to remove build artifacts
 
+## 🛠️ Usage
+
+After building, compile a `.tc` file to x86 assembly:
+```bash
+./build/main tests/test.tc  # Compiles test.tc -> outputs NASM assembly
+```
+
 ## Known Issues
 
 - Memory management: Current version shows memory leaks in valgrind (e.g., test14.tc shows ~1.3MB lost in ~32k blocks after 25k iterations)
