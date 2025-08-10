@@ -1,0 +1,33 @@
+int abc = 12;
+int x = 1;
+x += 5;
+int y = x << 1;
+int z = 1;
+if ((y-5<<1-1) - 6 == z) {
+    abc <<= 1;
+    if(y - 12)
+    {
+        exit(abc); 
+    }
+    else if(y-2*6) {
+        abc <<= 1;
+        exit(abc); 
+    }
+    else if(y) {
+        if(y-12) {
+            abc -= 1;
+            exit(abc);
+        }
+        else {
+            abc *= 3;
+            exit(abc);
+        } 
+    }
+    else {
+        abc += 1;
+        exit(abc); 
+    }
+}  
+
+exit(0x1000
+);

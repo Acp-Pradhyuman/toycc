@@ -1,0 +1,23 @@
+int a = 4 * 3 + 2;
+int b = a >> 1;
+int c = b & 3;
+int d = (a ^ b) - c;
+int e = d | 1;
+
+if ((a - 10) * (b - 5)) {
+    if (c == 3 && d > 5) {
+        if ((e ^ 2) == 5 || a == 15) {
+            exit(e);
+        } else {
+            exit(0xEE);
+        }
+    } else if (a > b && c < d) {
+        exit(0xCC);
+    } else {
+        exit(0xAA);
+    }
+} else if (a == 14 || b == 0) {
+    exit(0x44);
+} else {
+    exit(0x22);
+}

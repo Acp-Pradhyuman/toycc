@@ -1,0 +1,15 @@
+int x;
+int a = 11;
+a++;
+x = a++ + a*2;
+x = (a++)+a*5;
+int y = x + 2 * 3*x;
+y += a;
+y *= ++a;
+exit(x);
+exit(a+2*3-a/4);
+exit(123456789);
+exit(0x10);
+exit(0b100);
+exit(0100);
+exit(100);

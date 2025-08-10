@@ -1,0 +1,9 @@
+int a;
+int b = 1024*1024*1024;
+while(b) {
+    b >>= 1;
+    a+=1;
+    exit(a);
+}
+
+exit(a);

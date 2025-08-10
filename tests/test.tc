@@ -1,0 +1,14 @@
+int x;
+int a = 11;
+x = a;
+x=0b10;
+int y = x + 2 * 3*x;
+exit((y+07)/0b111);
+a = 21;
+a=x;
+exit(a+2*3-a/4);
+exit(123456789);
+exit(0x10);
+exit(0b100);
+exit(0100);
+exit(100);
