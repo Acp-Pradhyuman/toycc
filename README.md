@@ -254,8 +254,7 @@ This is currently a solo project, but I'd love to collaborate with others to imp
 | **Memory Leak Detection** | Valgrind reports leaks (e.g., `test14.tc` loses ~1.3MB after 25k iterations) |
 | **printf Implementation** | Core output functionality needs to be implemented                          |
 | **scanf Implementation**  | Input handling system not yet developed                                    |
-| **Optimizations**         | **Existing**: constant folding, dead code elimination, peephole optims |
-|                           | **Seeking**: Deeper improvements or alternative approaches |
+| **Optimizations**         | **Existing**: constant folding, dead code elimination, peephole optims<br>**Seeking**: Deeper improvements or alternative approaches |
 | **Testing & Bug Fixes**   | Edge-case handling, stability improvements, additional test cases          |
 
 ### How to Contribute
