@@ -16,19 +16,145 @@ Generates tokens from source code. Supports:
   - Binary (`0b...`)
   - Octal (`0...`)
 
-### 🧠 Parser + Semantic Analyzer
-Combines syntax parsing and semantic validation with several code optimizations:
-- **Block-scoped symbol table management**
-  - Symbol tables are created and destroyed within block scopes (`{ }`)
-- **Tree Representation**:
-  - Uses **Left-Child Right-Sibling (LCRS)** structure:
-    - Each statement node points to its first child (leftmost child)
-    - Subsequent statements in the same scope are linked as siblings (right pointers)
-- **Optimizations**:
-  - Constant folding
-  - Copy propagation
-  - Constant propagation
-  - Loop unrolling
+## 🧠 Parser + Semantic Analyzer
+
+Combines syntax parsing and semantic validation with several code optimizations.
+
+### 📦 Block-Scoped Symbol Table Management
+- Symbol tables are created and destroyed within block scopes (`{ }`)
+- Ensures proper variable scoping and memory management
+
+### 🌳 Tree Representation
+**Uses Left-Child Right-Sibling (LCRS) structure:**
+- Each statement node points to its first child (leftmost child)
+- Subsequent statements in the same scope are linked as siblings (via right pointers)
+
+**✅ Flexible Design:**
+```text
+Statement Blocks:           Expression Trees:
+      Node                       +
+     /    \                    /   \
+Child    Sibling            a       *
+                                  /   \
+                                 b     c
+```
+
+**🌳 LCRS Tree Structure Example**
+
+**Source Code:**
+```c
+stmt1;
+{
+    stmt2;
+    stmt3;
+}
+stmt4;
+```
+
+**🌳 Abstract Syntax Tree (AST) Structure**
+
+#### 📐 Visual Representation
+```text
+      PROGRAM
+         |
+       stmt1 → BLOCK → stmt4
+                |
+              stmt2 → stmt3
+```
+
+### 🔄 Dual-Purpose Structure
+The same tree architecture serves two roles:
+
+**1. For Statements**  
+Represents block hierarchy with:
+- Left child → First statement in block  
+- Right child → Next sibling statement  
+
+**2. For Expressions**  
+Builds operator trees where:
+- Root node → Operator (e.g. `+`, `*`)  
+- Left child → Left operand  
+- Right child → Right operand (or next operator in chained expressions)  
+
+**Key Benefit:**  
+Enables uniform traversal logic for both control flow and expressions.
+
+### 🚀 Optimizations
+| Optimization         | Description                          |
+|----------------------|--------------------------------------|
+| Constant Folding     | Pre-computes constant expressions   |
+| Copy Propagation     | Replaces redundant variable copies  |
+| Constant Propagation | Spreads known constant values       |
+| Loop Unrolling       | Expands loops for speed optimization|
+
+### 🚀 Loop Unrolling Implementation
+
+#### 🔄 While Loops:
+```c
+while (condition) { block }
+```
+#### 🔧 Processing Flow
+1. **First Iteration**:
+   - Parse condition and block exactly once
+   - Preserve these nodes for final AST generation
+   - Execute block to update symbol table state
+
+2. **Subsequent Iterations**:
+   - Re-parse condition using current symbol values
+   - Re-parse block with updated symbol table
+   - Discard AST nodes after capturing symbol updates
+   - Continue until condition evaluates to false
+
+#### 🔄 Do-While Loops
+```c
+do { block } while (condition);
+```
+#### 🔧 Processing Flow
+1. **First Iteration**  
+   - Executes block unconditionally (honoring do-while semantics)  
+   - Parses condition after block execution  
+   - Preserves these nodes for final AST generation  
+
+2. **Subsequent Iterations**  
+   - Re-parses block with current symbol values  
+   - Re-evaluates condition with updated variables  
+   - Discards AST nodes after capturing side effects  
+   - Continues until condition becomes false  
+
+#### ⚡ Core Optimization Properties
+```diff
++ Live Symbol Table Updates
+  - Direct mutations (no snapshots)
+  - Changes persist across iterations
+  - Single authoritative source for variable states (symbol table)
+
++ Semantic Accuracy
+  - While: Condition checked before each iteration
+  - Do-While: Condition checked after each iteration
+  - Both: First iteration always preserved in AST
+
++ Memory Efficiency
+  - Only first iteration nodes retained
+  - Subsequent nodes parsed/discarded
+  - No AST bloat from unrolling
+```
+
+### ✅ Optimization Guarantees
+
+| Feature               | Implementation Details                                                                 |
+|-----------------------|---------------------------------------------------------------------------------------|
+| **Semantic Accuracy** | Precisely matches runtime behavior through live symbol table updates                   |
+| **Memory Efficiency** | Zero memory overhead - no snapshots, reuses existing symbol table structures           |
+| **Variable Propagation** | Real-time value updates through direct symbol table mutations during each iteration  |
+| **Nested Support**    | Fully handles nested loops via scope stack with proper lexical scoping                 |
+| **Code Generation**   | Optimized output containing only first iteration nodes with all side effects preserved |
+
+**Key Insight**:  
+The implementation achieves loop unrolling through iterative re-parsing while maintaining 100% correct semantics via:
+- Live symbol table updates between iterations
+- Precise condition re-evaluation
+- Selective AST node retention (first iteration only)
+- Full scope stack integration for nested cases
 
 ### ⚙️ Code Generator
 - Directly generates **x86 assembly** using NASM syntax
@@ -71,13 +197,16 @@ Combines syntax parsing and semantic validation with several code optimizations:
                     | "==" | "!=" 
                     | "&" | "^" | "&&" | "||"
 
-<variable_declaration> ::= "int" Identifier ";"
-                         | "int" Identifier "=" <expression> ";"
+<variable_declaration> ::= "int" Identifier <declaration_chain> ";"
+
+<declaration_chain> ::= <, Identifier>* 
+                      | <, Identifier = <expression>>* 
+                      | = <expression> (<, Identifier>* | <, Identifier = <expression>>*)
 
 <variable_assignment> ::= Identifier <assignment_op> <expression> ";"
 
 <assignment_op>  ::= "=" | "+=" | "-=" | "*=" | "/=" 
-                   | "%=" | "<<=" | ">>="
+                    | "%=" | "<<=" | ">>="
 
 <while_statement> ::= "while" "(" <expression> ")" <block_statement>
 
