@@ -230,6 +230,10 @@ The implementation achieves loop unrolling through iterative re-parsing while ma
 After building, compile a `.tc` file to x86 assembly:
 ```bash
 ./build/main tests/test.tc  # Compiles test.tc -> outputs NASM assembly
+
+./generated                 # Compiled test.tc
+
+echo $?                     # prints the exit status (0 - 255)
 ```
 
 ## Known Issues
