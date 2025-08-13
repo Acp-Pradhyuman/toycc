@@ -19,6 +19,75 @@ Generates tokens from source code. Supports:
 ## 🧠 Parser + Semantic Analyzer
 
 Combines syntax parsing and semantic validation with several code optimizations.
+> ⚠️ **Note**
+>
+> This compiler does **not implement a traditional Intermediate Representation (IR)** stage.  
+> Instead, **all optimizations are performed directly** during the combined syntax and semantic analysis phase, using the Abstract Syntax Tree (AST) and symbol table structures.
+> 
+> This design simplifies the compiler pipeline and avoids the need for explicit transformation stages like CFG construction or SSA form. However, it tightly couples optimizations with AST traversal, symbol resolution, and block scoping logic.
+>
+> ---
+>
+> ### 🔀 Control Flow Analysis Without CFG/SSA
+>
+> Instead of constructing a Control Flow Graph (CFG) or applying Static Single Assignment (SSA), the compiler tracks control flow and expression validity using a boolean mechanism called `condition_active`.  
+> This flag determines whether a given branch (like an `if`, `else if`, or loop body) is semantically reachable — based on compile-time evaluation of its condition.
+>
+> During analysis:
+> - Only **semantically active** branches (where `condition_active == true`) are traversed.
+> - Any code in inactive branches is **skipped entirely** during semantic and code generation.
+>
+> This approach replaces the need for:
+> - CFG: since control flow decisions are made statically using known values.
+> - SSA: because variable values are tracked and updated directly in scoped symbol tables without renaming or phi nodes.
+>
+> ---
+>
+> ### ⚙️ Optimizations Performed in Semantic Phase
+>
+> By folding expression trees and using scoped symbol tables, the compiler performs the following optimizations **without generating IR**:
+>
+> - **Constant Folding**: Subexpressions involving literals are evaluated during syntax/semantic traversal (e.g. `4 * 3 + 2` becomes `14`).
+> - **Constant Propagation**: Known values of variables are retrieved from the symbol table and reused during analysis.
+> - **Copy Propagation**: When variables are assigned other variables (e.g. `x = y`), the known value of `y` is propagated into `x`.
+>
+> Variables are **not renamed**; instead, they are **reused and updated** within block-local or parent symbol tables.  
+> This achieves SSA-like behavior — where the most recent valid value of a variable is always used — **without actually generating SSA form**.
+>
+> ---
+>
+> ### 🧹 Dead Code Elimination via `exit_emitted`
+>
+> Code generation is tightly optimized based on semantic results:
+>
+> - As the AST is traversed, only **the first semantically active `exit()`** statement is emitted.
+> - Once an `exit()` is emitted, a flag `exit_emitted` is set, and all subsequent code paths — even if active — are **considered dead** and discarded during codegen.
+>
+> This results in efficient, minimal assembly output, with no extra instructions after the selected control path is resolved.
+>
+> ---
+>
+> ### 🧠 Blocks Without Observable Effects
+>
+> Even when a block is semantically active (e.g. its condition is `true`), it will still be **excluded from code generation** if it doesn’t contain an `exit()` or any other code with observable side effects.
+>
+> For example:
+>
+> ```c
+> if (x > 0) {
+>     y = 10;        // Semantically processed, but has no effect at runtime
+> } else if (x > -10) {
+>     // Block B
+> } else {
+>     // Block C
+> }
+> ```
+>
+> If `x > 0` is known to be `true` at compile time:
+>
+> - The assignment `y = 10;` is evaluated in the semantic phase and updates the symbol table.
+> - But since this block lacks an `exit()` or output, it is **not included in the final code**.
+> - Blocks B and C are ignored entirely due to being unreachable.
 
 ### 📦 Block-Scoped Symbol Table Management
 - Symbol tables are created and destroyed within block scopes (`{ }`)
@@ -34,7 +103,7 @@ Combines syntax parsing and semantic validation with several code optimizations.
 Statement Blocks:           Expression Trees:
       Node                       +
      /    \                    /   \
-Child    Sibling            a       *
+Child    Sibling              a     *
                                   /   \
                                  b     c
 ```

@@ -1,0 +1,15 @@
+// Test cases that will work perfectly:
+int a = 10 / 5;          // Division operator
+int b = 2;              // Compound assignment
+// Single line comment   // Skipped
+/* Multi-line comment */ // Skipped
+int x = 0xFF;            // Hex numbers
+int y = 0b1010;          // Binary numbers
+int z = 077;             // Octal numbers
+z /= 3;
+
+// Error cases that are properly caught:
+/* Unterminated comment  // ERROR: Clear message with line/col
+0xG                      // ERROR: Invalid hex literal
+$invalid                 // ERROR: Stray special character*/
+exit(z);

@@ -5,6 +5,57 @@
 // should be local to lexer only hence static
 static int col = 1, line = 1;
 
+void skip_single_line_comment(FILE *file, int *line, int *col)
+{
+    char ch;
+    while ((ch = fgetc(file)) != EOF && ch != '\n')
+    {
+        (*col)++;
+    }
+    if (ch == '\n')
+    {
+        (*line)++;
+        *col = 0;
+    }
+}
+
+void skip_multi_line_comment(FILE *file, int *line, int *col)
+{
+    int comment_start_line = *line;
+    int comment_start_col = *col - 1;  // The '/' position
+    char ch;
+    
+    while ((ch = fgetc(file)) != EOF)
+    {
+        (*col)++;
+        if (ch == '\n')
+        {
+            (*line)++;
+            *col = 0;
+        }
+        else if (ch == '*')
+        {
+            char next = fgetc(file);
+            if (next == '/')
+            {
+                (*col)++;
+                return;  // Successfully closed
+            }
+            else if (next != EOF)
+            {
+                ungetc(next, file);
+                (*col)--;
+            }
+        }
+    }
+    
+    // Error message that matches your existing style
+    fprintf(stderr, "ERROR: Unterminated multi-line comment at line %d, "
+                   "col %d - missing closing '*/'\n", 
+                   comment_start_line, comment_start_col);
+    exit(EXIT_FAILURE);
+}
+
 bool is_binary_digit(char ch)
 {
     return ch == '0' || ch == '1';
@@ -357,7 +408,49 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             tokens[count++] = token;
         }
 
-        else if (strchr("+-*/%=&|^!<>", ch))
+        else if (ch == '/')
+        {
+            int start_col = col;
+            char next = fgetc(file);
+            col++;
+
+            if (next == '/')
+            {
+                // Single-line comment - skip it
+                skip_single_line_comment(file, &line, &col);
+            }
+            else if (next == '*')
+            {
+                // Multi-line comment - skip it
+                skip_multi_line_comment(file, &line, &col);
+            }
+            else
+            {
+                // Division operator (/ or /=)
+                char op[3] = {'/', '\0', '\0'};
+
+                if (next == '=')
+                {
+                    op[1] = '='; // /= operator
+                }
+                else
+                {
+                    ungetc(next, file); // Put back the character
+                    col--;
+                }
+
+                Token token;
+                token.type = OPERATOR;
+                token.value.str_val = strdup(op);
+                token.col = start_col;
+                token.line = line;
+                print_token(token);
+                tokens[count++] = token;
+            }
+        }
+
+        // else if (strchr("+-*/%=&|^!<>", ch))
+        else if (strchr("+-*%=&|^!<>", ch))
         {
             int start_col = col;
             char op[4] = {ch, '\0', '\0', '\0'}; // Max 3-char operators
@@ -370,7 +463,7 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
                 (ch == '-' && next == '=') ||
                 (ch == '-' && next == '-') ||
                 (ch == '*' && next == '=') ||
-                (ch == '/' && next == '=') ||
+                // (ch == '/' && next == '=') ||
                 (ch == '%' && next == '=') ||
                 (ch == '=' && next == '=') ||
                 (ch == '!' && next == '=') ||
