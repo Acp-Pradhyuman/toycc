@@ -110,11 +110,11 @@ void traverse_tree(Node *node, FILE *file, ScopeType scope, bool *exit_emitted,
         {
             condition_active = cond->value.int_val != 0;
         }
-        else if (cond && cond->type == NODE_IDENTIFIER)
-        {
-            // or look up variable value if you track it
-            condition_active = true; 
-        }
+        // else if (cond && cond->type == NODE_IDENTIFIER)
+        // {
+        //     // or look up variable value if you track it
+        //     condition_active = true; 
+        // }
         else if (cond)
         {
             condition_active = true; // assume true for non-literals
