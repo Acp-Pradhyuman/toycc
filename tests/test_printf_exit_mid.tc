@@ -1,0 +1,13 @@
+// Verify that once exit() is simulated, later printfs never emit —
+// even printfs that the AST says are "after" exit in another iteration.
+for (int i = 0; i < 10; i += 1) {
+    printf("iter %d\n", i);
+    if (i == 2) {
+        exit(i);
+    }
+    printf("after if in iter %d\n", i);
+}
+
+// Anything below exit must never be emitted.
+printf("DEAD: should never print\n");
+exit(99);

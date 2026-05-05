@@ -3,13 +3,20 @@
 #include <ctype.h>
 #include "parser.h"
 
+// Hard cap on loop-unroll iterations. Since loops are simulated at
+// compile time, a runtime-style infinite loop would hang the compiler.
+// The cap is large enough to not regress real tests (test14 runs ~840K
+// iterations) but small enough to fail fast on genuine infinite loops.
+#define MAX_LOOP_ITERATIONS 10000000
+
 // Forward declarations
 static Node *parse_expression(Token *tokens, size_t *i, size_t num_tokens,
                               ScopeStack *scope_stack, int min_precedence);
 static Node *parse_primary(Token *tokens, size_t *i, size_t num_tokens,
                            ScopeStack *scope_stack);
 static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
-                         ScopeStack *scope_stack, bool condition_active);
+                         ScopeStack *scope_stack, OutputLog *log,
+                         bool condition_active);
 
 void debugPrintNode(const char *prefix, Node *node)
 {
@@ -864,7 +871,11 @@ static Node *parse_assignment_statement(Token *tokens, size_t *i,
         value_to_store = bin_op;
     }
 
-    assign_node->right = value_to_store;
+    // AST shape: assign_node->left = lhs, lhs->right = value_to_store.
+    // This keeps assign_node->right free to act as the LCRS sibling
+    // pointer for the enclosing block, avoiding aliasing between
+    // "RHS of assignment" and "next statement".
+    lhs->right = value_to_store;
 
     // Only update symbol if the condition is active
     if (condition_active && target_table)
@@ -941,7 +952,7 @@ static Node *parse_assignment_statement(Token *tokens, size_t *i,
 
                 // Properly free the binary expression and its children
                 free_ast(value_to_store);
-                assign_node->right = literal_result;
+                lhs->right = literal_result;
             }
         }
     }
@@ -951,7 +962,8 @@ static Node *parse_assignment_statement(Token *tokens, size_t *i,
 
 // Exit Statement Parser
 static Node *parse_exit_statement(Token *tokens, size_t *i, size_t num_tokens,
-                                  ScopeStack *scope_stack)
+                                  ScopeStack *scope_stack, OutputLog *log,
+                                  bool condition_active)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -1034,7 +1046,300 @@ static Node *parse_exit_statement(Token *tokens, size_t *i, size_t num_tokens,
     (*i)++;
 
     exit_node->left = arg;
+
+    // Log the exit so codegen can emit it. Only if this path is live
+    // (condition_active == true); dead branches never reach runtime.
+    if (condition_active)
+    {
+        int code = 0;
+        if (arg->type == NODE_LITERAL_INT)
+        {
+            code = arg->value.int_val;
+        }
+        else if (arg->type == NODE_IDENTIFIER)
+        {
+            Symbol *sym = find_symbol_in_scope_stack(scope_stack,
+                                                     arg->value.str_val);
+            if (sym)
+                code = sym->value;
+        }
+        output_log_append_exit(log, code);
+    }
+
     return exit_node;
+}
+
+// Integer to decimal ASCII, signed. Writes into out[]; returns length.
+// out must hold at least 12 bytes (for -2147483648 + null terminator not
+// required here, we return length only).
+static size_t int_to_ascii(int value, char out[12])
+{
+    if (value == 0)
+    {
+        out[0] = '0';
+        return 1;
+    }
+
+    char tmp[12];
+    size_t t = 0;
+    int negative = 0;
+    unsigned int uv;
+    if (value < 0)
+    {
+        negative = 1;
+        uv = (unsigned int)(-(long long)value);
+    }
+    else
+    {
+        uv = (unsigned int)value;
+    }
+    while (uv > 0)
+    {
+        tmp[t++] = (char)('0' + (uv % 10));
+        uv /= 10;
+    }
+    size_t len = 0;
+    if (negative)
+        out[len++] = '-';
+    while (t > 0)
+        out[len++] = tmp[--t];
+    return len;
+}
+
+// printf("fmt" [, arg]*); — simulates the call and appends the
+// final byte sequence to the output log (when condition_active).
+static Node *parse_printf_statement(Token *tokens, size_t *i,
+                                    size_t num_tokens,
+                                    ScopeStack *scope_stack,
+                                    OutputLog *log,
+                                    bool condition_active)
+{
+    int start_line = tokens[*i].line;
+    int start_col = tokens[*i].col;
+
+    Node *printf_node = createNode(NODE_PRINTF_CALL, "printf",
+                                   start_line, start_col);
+    if (!printf_node)
+    {
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    (*i)++; // consume 'printf'
+
+    if (*i >= num_tokens ||
+        tokens[*i].type != SEPARATOR ||
+        strcmp(tokens[*i].value.str_val, "(") != 0)
+    {
+        printf("Error: Expected '(' after 'printf' at line %d\n",
+               tokens[*i - 1].line);
+        free_ast(printf_node);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    (*i)++;
+
+    // Format string must be a string literal.
+    if (*i >= num_tokens || tokens[*i].type != STRING_LITERAL)
+    {
+        printf("Error: printf requires a string literal format at line %d\n",
+               tokens[*i].line);
+        free_ast(printf_node);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    Token fmt_tok = tokens[*i];
+    (*i)++;
+
+    // Build final bytes in a growable buffer.
+    size_t cap = fmt_tok.str_len + 16;
+    size_t len = 0;
+    char *out = malloc(cap);
+    if (!out)
+    {
+        fprintf(stderr, "printf: malloc failed\n");
+        free_ast(printf_node);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+
+#define ENSURE(n)                                                 \
+    do                                                            \
+    {                                                             \
+        while (len + (n) > cap)                                   \
+        {                                                         \
+            cap *= 2;                                             \
+            char *nb = realloc(out, cap);                         \
+            if (!nb)                                              \
+            {                                                     \
+                fprintf(stderr, "printf: realloc failed\n");      \
+                free(out);                                        \
+                free_ast(printf_node);                            \
+                free_scope_stack(scope_stack);                    \
+                free_tokens(tokens, num_tokens);                  \
+                exit(1);                                          \
+            }                                                     \
+            out = nb;                                             \
+        }                                                         \
+    } while (0)
+
+    // Walk the format string, consuming an argument for each conversion.
+    for (size_t p = 0; p < fmt_tok.str_len; p++)
+    {
+        char c = fmt_tok.value.str_val[p];
+        if (c != '%')
+        {
+            ENSURE(1);
+            out[len++] = c;
+            continue;
+        }
+        if (p + 1 >= fmt_tok.str_len)
+        {
+            printf("Error: trailing '%%' in format at line %d\n",
+                   fmt_tok.line);
+            free(out);
+            free_ast(printf_node);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+        char spec = fmt_tok.value.str_val[++p];
+
+        if (spec == '%')
+        {
+            ENSURE(1);
+            out[len++] = '%';
+            continue;
+        }
+
+        // Need a comma and an argument for %d and %s.
+        if (*i >= num_tokens ||
+            tokens[*i].type != SEPARATOR ||
+            strcmp(tokens[*i].value.str_val, ",") != 0)
+        {
+            printf("Error: printf: missing argument for '%%%c' at line %d\n",
+                   spec, fmt_tok.line);
+            free(out);
+            free_ast(printf_node);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+        (*i)++; // consume ','
+
+        if (spec == 'd')
+        {
+            Node *arg = parse_expression(tokens, i, num_tokens,
+                                         scope_stack, 0);
+            if (!arg)
+            {
+                free(out);
+                free_ast(printf_node);
+                free_scope_stack(scope_stack);
+                free_tokens(tokens, num_tokens);
+                exit(1);
+            }
+            int val = 0;
+            if (arg->type == NODE_LITERAL_INT)
+            {
+                val = arg->value.int_val;
+            }
+            else if (arg->type == NODE_IDENTIFIER)
+            {
+                Symbol *sym = find_symbol_in_scope_stack(
+                    scope_stack, arg->value.str_val);
+                if (!sym)
+                {
+                    printf("Error: Undefined variable '%s' at line %d\n",
+                           arg->value.str_val, arg->line);
+                    free_ast(arg);
+                    free(out);
+                    free_ast(printf_node);
+                    free_scope_stack(scope_stack);
+                    free_tokens(tokens, num_tokens);
+                    exit(1);
+                }
+                val = sym->value;
+            }
+            free_ast(arg);
+
+            char digits[12];
+            size_t dlen = int_to_ascii(val, digits);
+            ENSURE(dlen);
+            for (size_t d = 0; d < dlen; d++)
+                out[len++] = digits[d];
+        }
+        else if (spec == 's')
+        {
+            if (*i >= num_tokens || tokens[*i].type != STRING_LITERAL)
+            {
+                printf("Error: printf %%s requires a string literal "
+                       "argument at line %d\n",
+                       tokens[*i].line);
+                free(out);
+                free_ast(printf_node);
+                free_scope_stack(scope_stack);
+                free_tokens(tokens, num_tokens);
+                exit(1);
+            }
+            Token s = tokens[*i];
+            (*i)++;
+            ENSURE(s.str_len);
+            for (size_t k = 0; k < s.str_len; k++)
+                out[len++] = s.value.str_val[k];
+        }
+        else
+        {
+            printf("Error: printf: unsupported conversion '%%%c' at line %d\n",
+                   spec, fmt_tok.line);
+            free(out);
+            free_ast(printf_node);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+    }
+#undef ENSURE
+
+    // Expect ')'
+    if (*i >= num_tokens ||
+        tokens[*i].type != SEPARATOR ||
+        strcmp(tokens[*i].value.str_val, ")") != 0)
+    {
+        printf("Error: Expected ')' after printf args at line %d\n",
+               tokens[*i - 1].line);
+        free(out);
+        free_ast(printf_node);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    (*i)++;
+
+    // Expect ';'
+    if (*i >= num_tokens ||
+        tokens[*i].type != SEPARATOR ||
+        strcmp(tokens[*i].value.str_val, ";") != 0)
+    {
+        printf("Error: Expected ';' after printf(...) at line %d\n",
+               tokens[*i - 1].line);
+        free(out);
+        free_ast(printf_node);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    (*i)++;
+
+    if (condition_active && len > 0)
+    {
+        output_log_append_write(log, out, len);
+    }
+    free(out);
+    return printf_node;
 }
 
 // AST Freeing
@@ -1095,6 +1400,10 @@ void treeTraversal(Node *node, int depth)
             treeTraversal(node->left, depth + 1);
             break;
 
+        case NODE_PRINTF_CALL:
+            printf("PRINTF_CALL\n");
+            break;
+
         case NODE_IF_STATEMENT:
             printf("IF_STATEMENT\n");
 
@@ -1124,6 +1433,11 @@ void treeTraversal(Node *node, int depth)
             for (int i = 0; i < depth + 1; i++)
                 printf("  ");
             printf("CONDITION:\n");
+            treeTraversal(node->left, depth + 2);
+            break;
+
+        case NODE_FOR_STATEMENT:
+            printf("FOR_STATEMENT\n");
             treeTraversal(node->left, depth + 2);
             break;
 
@@ -1172,7 +1486,9 @@ void treeTraversal(Node *node, int depth)
 }
 
 static Node *parse_if_statement(Token *tokens, size_t *i, size_t num_tokens,
-                                ScopeStack *scope_stack, Node **last_node_out)
+                                ScopeStack *scope_stack, OutputLog *log,
+                                Node **last_node_out,
+                                bool outer_condition_active)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -1229,9 +1545,10 @@ static Node *parse_if_statement(Token *tokens, size_t *i, size_t num_tokens,
         }
     }
 
-    // Parse then block with the condition status
-    Node *then_block = parse_block(tokens, i, num_tokens, scope_stack,
-                                   condition_active);
+    // Parse then block with the condition status. Gate on outer scope too:
+    // a nested if inside a dead branch must stay dead.
+    Node *then_block = parse_block(tokens, i, num_tokens, scope_stack, log,
+                                   outer_condition_active && condition_active);
     if (!then_block)
     {
         free_ast(condition);
@@ -1269,7 +1586,9 @@ static Node *parse_if_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 static Node *parse_else_if_statements(Token *tokens, size_t *i,
                                       size_t num_tokens,
-                                      ScopeStack *scope_stack, Node *if_node,
+                                      ScopeStack *scope_stack, OutputLog *log,
+                                      Node *if_node,
+                                      bool outer_condition_active,
                                       bool prev_condition_active,
                                       Node **last_else_if_out)
 {
@@ -1346,9 +1665,11 @@ static Node *parse_else_if_statements(Token *tokens, size_t *i,
             any_condition_active = any_condition_active || condition_active;
         }
 
-        // Parse then block
+        // Parse then block. Gate on outer scope too.
         Node *else_if_block = parse_block(tokens, i, num_tokens,
-                                          scope_stack, condition_active);
+                                          scope_stack, log,
+                                          outer_condition_active &&
+                                              condition_active);
         if (!else_if_block)
         {
             free_ast(condition);
@@ -1391,7 +1712,9 @@ static Node *parse_else_if_statements(Token *tokens, size_t *i,
 }
 
 static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
-                                  ScopeStack *scope_stack, Node **last_node_out)
+                                  ScopeStack *scope_stack, OutputLog *log,
+                                  Node **last_node_out,
+                                  bool outer_condition_active)
 {
     // First check if we're starting with 'else' without preceding 'if'
     if (tokens[*i].type == KEYWORD &&
@@ -1417,7 +1740,8 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
     // Now parse the required if statement first
     Node *if_node = parse_if_statement(tokens, i, num_tokens,
-                                       scope_stack, NULL);
+                                       scope_stack, log, NULL,
+                                       outer_condition_active);
     if (!if_node)
     {
         free_scope_stack(scope_stack);
@@ -1447,8 +1771,9 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
     // Now parse any else if statements and get the last one
     Node *last_else_if = NULL;
-    parse_else_if_statements(tokens, i, num_tokens, scope_stack,
-                             if_node, any_condition_active, &last_else_if);
+    parse_else_if_statements(tokens, i, num_tokens, scope_stack, log,
+                             if_node, outer_condition_active,
+                             any_condition_active, &last_else_if);
 
     if (last_else_if)
     {
@@ -1493,9 +1818,9 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
         // Else block is only active if no previous condition was true
         bool else_active = !any_condition_active;
 
-        // Parse else block
-        Node *else_block = parse_block(tokens, i, num_tokens, scope_stack,
-                                       else_active);
+        // Parse else block. Gate on outer scope.
+        Node *else_block = parse_block(tokens, i, num_tokens, scope_stack, log,
+                                       outer_condition_active && else_active);
         if (!else_block)
         {
             free_ast(if_node);
@@ -1544,7 +1869,7 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 // DO-WHILE LOOP PARSER
 Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
-                               ScopeStack *scope_stack)
+                               ScopeStack *scope_stack, OutputLog *log)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -1572,6 +1897,18 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     do
     {
         iteration_count++;
+        if (iteration_count > MAX_LOOP_ITERATIONS)
+        {
+            fprintf(stderr,
+                    "Error: do-while loop exceeded %d iterations at "
+                    "line %d (likely infinite loop — runtime loops not "
+                    "supported)\n",
+                    MAX_LOOP_ITERATIONS, start_line);
+            free_ast(do_while_node);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
         size_t temp_i = block_start_pos;
 
         printf("[DEBUG] Do-While Iteration %d: Parsing block "
@@ -1580,7 +1917,7 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 
         // Parse block first (this is the key difference from while loop)
         Node *block = parse_block(tokens, &temp_i, num_tokens,
-                                  scope_stack, condition_active);
+                                  scope_stack, log, condition_active);
         if (!block)
         {
             printf("Error: Failed to parse do-while block\n");
@@ -1769,8 +2106,10 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     // Advance parser index past the entire do-while statement
     *i = block_start_pos;
 
-    // Skip past block parsing
-    Node *temp_block = parse_block(tokens, i, num_tokens, scope_stack, false);
+    // Skip past block parsing. Pass a throwaway log (NULL) so re-parses
+    // for index-advancing don't re-log output.
+    Node *temp_block = parse_block(tokens, i, num_tokens, scope_stack, NULL,
+                                   false);
     if (temp_block)
     {
         free_ast(temp_block); // Free the temporary block
@@ -1819,7 +2158,7 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 // WHILE LOOP PARSER
 Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
-                            ScopeStack *scope_stack)
+                            ScopeStack *scope_stack, OutputLog *log)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -1857,6 +2196,17 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     while (condition_active)
     {
         iteration_count++;
+        if (iteration_count > MAX_LOOP_ITERATIONS)
+        {
+            fprintf(stderr,
+                    "Error: while loop exceeded %d iterations at line %d "
+                    "(likely infinite loop — runtime loops not supported)\n",
+                    MAX_LOOP_ITERATIONS, start_line);
+            free_ast(while_node);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
         size_t temp_i = loop_start_pos;
 
         printf("[DEBUG] Iteration %d: Parsing condition at token index %zu\n",
@@ -1912,7 +2262,7 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 
         // Parse block - this updates symbol table for semantic analysis
         Node *block = parse_block(tokens, &temp_i, num_tokens, scope_stack,
-                                  condition_active);
+                                  log, condition_active);
         if (!block)
         {
             printf("Error: Failed to parse while block\n");
@@ -1964,8 +2314,9 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
         (*i)++; // skip ')'
     }
 
-    // Skip past block parsing
-    Node *temp_block = parse_block(tokens, i, num_tokens, scope_stack, false);
+    // Skip past block parsing — pass NULL log so skip doesn't re-log.
+    Node *temp_block = parse_block(tokens, i, num_tokens, scope_stack, NULL,
+                                   false);
     if (temp_block)
     {
         free_ast(temp_block); // Free the temporary block
@@ -1978,9 +2329,410 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     return while_node;
 }
 
+// FOR LOOP PARSER
+// Structure:  for (init; cond; post) { body }
+// Each of init/cond/post is optional. Only the first iteration's cond+body
+// are preserved on the AST; init and post are simulated for their
+// side-effects on the symbol table, matching the existing while/do-while
+// simulation model.
+Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
+                          ScopeStack *scope_stack, OutputLog *log)
+{
+    int start_line = tokens[*i].line;
+    int start_col = tokens[*i].col;
+
+    (*i)++; // consume 'for'
+
+    if (*i >= num_tokens || strcmp(tokens[*i].value.str_val, "(") != 0)
+    {
+        printf("Error: Expected '(' after 'for' at line %d\n",
+               tokens[*i].line);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    (*i)++; // consume '('
+
+    // Push a scope for the for-loop so that `int i = 0` in init is
+    // scoped to the loop, matching C semantics.
+    SymbolTable *for_scope = create_symbol_table();
+    if (!for_scope)
+    {
+        printf("Error: Failed to create for-loop scope\n");
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+    push_scope(scope_stack, for_scope);
+
+    // --- Parse init (var decl, assignment, or empty) ---
+    Node *init_node = NULL;
+    if (strcmp(tokens[*i].value.str_val, ";") == 0)
+    {
+        (*i)++; // empty init, consume ';'
+    }
+    else if (tokens[*i].type == KEYWORD &&
+             strcmp(tokens[*i].value.str_val, "int") == 0)
+    {
+        Node *last = NULL;
+        init_node = parse_variable_declaration(tokens, i, num_tokens,
+                                               scope_stack, &last, true);
+        // parse_variable_declaration consumes the trailing ';'
+    }
+    else if (tokens[*i].type == IDENTIFIER)
+    {
+        init_node = parse_assignment_statement(tokens, i, num_tokens,
+                                               scope_stack, true);
+        // parse_assignment_statement consumes the trailing ';'
+    }
+    else
+    {
+        printf("Error: Invalid init clause in 'for' at line %d\n",
+               tokens[*i].line);
+        pop_scope(scope_stack);
+        free_symbol_table(for_scope);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+
+    // Remember position of condition so we can re-parse it each iteration.
+    size_t cond_start_pos = *i;
+
+    Node *for_node = createNode(NODE_FOR_STATEMENT, "for",
+                                start_line, start_col);
+    if (!for_node)
+    {
+        free_ast(init_node);
+        pop_scope(scope_stack);
+        free_symbol_table(for_scope);
+        free_scope_stack(scope_stack);
+        free_tokens(tokens, num_tokens);
+        exit(1);
+    }
+
+    // Init node appears on the AST as the first thing linked off for_node.
+    // Chain: for_node->left = init -> cond -> body
+    // (If init is NULL, for_node->left = cond directly.)
+
+    Node *first_condition = NULL;
+    Node *first_block = NULL;
+    bool first_iteration = true;
+    bool condition_active = true;
+    int iteration_count = 0;
+
+    while (condition_active)
+    {
+        iteration_count++;
+        if (iteration_count > MAX_LOOP_ITERATIONS)
+        {
+            fprintf(stderr,
+                    "Error: for loop exceeded %d iterations at line %d "
+                    "(likely infinite loop — runtime loops not supported)\n",
+                    MAX_LOOP_ITERATIONS, start_line);
+            free_ast(init_node);
+            free_ast(for_node);
+            pop_scope(scope_stack);
+            free_symbol_table(for_scope);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+        size_t temp_i = cond_start_pos;
+
+        // --- Parse condition (empty condition == true, like C) ---
+        Node *condition = NULL;
+        bool empty_cond = false;
+        if (strcmp(tokens[temp_i].value.str_val, ";") == 0)
+        {
+            empty_cond = true;
+            condition_active = true;
+            // Synthesize a literal-1 so the AST has something.
+            condition = createNode(NODE_LITERAL_INT, NULL,
+                                   tokens[temp_i].line, tokens[temp_i].col);
+            if (condition)
+                condition->value.int_val = 1;
+            temp_i++; // consume ';'
+        }
+        else
+        {
+            condition = parse_expression(tokens, &temp_i, num_tokens,
+                                         scope_stack, 0);
+            if (!condition)
+            {
+                printf("Error: Failed to parse for condition\n");
+                free_ast(init_node);
+                free_ast(for_node);
+                pop_scope(scope_stack);
+                free_symbol_table(for_scope);
+                free_scope_stack(scope_stack);
+                free_tokens(tokens, num_tokens);
+                exit(1);
+            }
+
+            if (temp_i >= num_tokens ||
+                strcmp(tokens[temp_i].value.str_val, ";") != 0)
+            {
+                printf("Error: Expected ';' after for condition at line %d\n",
+                       tokens[temp_i - 1].line);
+                free_ast(condition);
+                free_ast(init_node);
+                free_ast(for_node);
+                pop_scope(scope_stack);
+                free_symbol_table(for_scope);
+                free_scope_stack(scope_stack);
+                free_tokens(tokens, num_tokens);
+                exit(1);
+            }
+            temp_i++; // consume ';'
+
+            // Evaluate condition against current symbol state
+            if (condition->type == NODE_LITERAL_INT)
+            {
+                condition_active = condition->value.int_val != 0;
+            }
+            else if (condition->type == NODE_IDENTIFIER)
+            {
+                Symbol *sym = find_symbol_in_scope_stack(
+                    scope_stack, condition->value.str_val);
+                condition_active = sym ? (sym->value != 0) : false;
+            }
+        }
+
+        // If condition is false, stop before parsing body/post.
+        if (!condition_active)
+        {
+            if (!first_iteration || empty_cond)
+            {
+                // We already have a first_condition saved, or condition is
+                // synthetic; this one is disposable.
+                free_ast(condition);
+            }
+            else
+            {
+                // Save the final (failing) condition on the AST.
+                first_condition = condition;
+            }
+            break;
+        }
+
+        // Remember where the post clause starts so we can skip past it.
+        size_t post_start_pos = temp_i;
+
+        // Skip past post clause to find the body block.
+        // Post clause runs until the matching ')'. We don't parse it yet —
+        // the body must run first, then the post.
+        int paren_depth = 1;
+        while (temp_i < num_tokens && paren_depth > 0)
+        {
+            if (tokens[temp_i].type == SEPARATOR)
+            {
+                const char *s = tokens[temp_i].value.str_val;
+                if (s && strcmp(s, "(") == 0)
+                    paren_depth++;
+                else if (s && strcmp(s, ")") == 0)
+                    paren_depth--;
+            }
+            if (paren_depth == 0)
+                break;
+            temp_i++;
+        }
+        if (temp_i >= num_tokens)
+        {
+            printf("Error: Unterminated 'for' header at line %d\n",
+                   tokens[cond_start_pos].line);
+            free_ast(condition);
+            free_ast(init_node);
+            free_ast(for_node);
+            pop_scope(scope_stack);
+            free_symbol_table(for_scope);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+        temp_i++; // consume ')'
+
+        // --- Parse body block ---
+        Node *block = parse_block(tokens, &temp_i, num_tokens,
+                                  scope_stack, log, true);
+        if (!block)
+        {
+            free_ast(condition);
+            free_ast(init_node);
+            free_ast(for_node);
+            pop_scope(scope_stack);
+            free_symbol_table(for_scope);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+
+        // --- Execute post (for symbol-table side effects) ---
+        if (post_start_pos < temp_i)
+        {
+            size_t post_i = post_start_pos;
+            // Post can be an assignment (identifier op expr) or empty.
+            if (strcmp(tokens[post_i].value.str_val, ")") != 0)
+            {
+                if (tokens[post_i].type == IDENTIFIER &&
+                    post_i + 1 < num_tokens &&
+                    tokens[post_i + 1].type == OPERATOR)
+                {
+                    // Synthesize a trailing ';' context by using a scratch
+                    // parse: parse_assignment_statement expects ';' to
+                    // terminate. The tokens have ')' instead. Instead of
+                    // synthesizing, manually evaluate: identifier op expr.
+                    // We'll reuse parse_assignment_statement by temporarily
+                    // swapping the ')' for a ';' — but we can't mutate
+                    // tokens safely. Simplest: inline-evaluate.
+                    Token id_tok = tokens[post_i];
+                    Token op_tok = tokens[post_i + 1];
+                    size_t e_i = post_i + 2;
+                    Node *rhs = parse_expression(tokens, &e_i, num_tokens,
+                                                 scope_stack, 0);
+                    if (rhs)
+                    {
+                        SymbolTable *target = NULL;
+                        for (int j = scope_stack->size - 1; j >= 0; j--)
+                        {
+                            if (find_symbol(scope_stack->tables[j],
+                                            id_tok.value.str_val))
+                            {
+                                target = scope_stack->tables[j];
+                                break;
+                            }
+                        }
+                        if (target)
+                        {
+                            Symbol *sym = find_symbol(target,
+                                                      id_tok.value.str_val);
+                            int cur = sym ? sym->value : 0;
+                            int rhs_val = 0;
+                            if (rhs->type == NODE_LITERAL_INT)
+                                rhs_val = rhs->value.int_val;
+                            else if (rhs->type == NODE_IDENTIFIER)
+                            {
+                                Symbol *rs = find_symbol_in_scope_stack(
+                                    scope_stack, rhs->value.str_val);
+                                if (rs)
+                                    rhs_val = rs->value;
+                            }
+                            const char *op = op_tok.value.str_val;
+                            int res = cur;
+                            if (strcmp(op, "=") == 0)
+                                res = rhs_val;
+                            else if (strcmp(op, "+=") == 0)
+                                res = cur + rhs_val;
+                            else if (strcmp(op, "-=") == 0)
+                                res = cur - rhs_val;
+                            else if (strcmp(op, "*=") == 0)
+                                res = cur * rhs_val;
+                            else if (strcmp(op, "/=") == 0 && rhs_val != 0)
+                                res = cur / rhs_val;
+                            else if (strcmp(op, "%=") == 0 && rhs_val != 0)
+                                res = cur % rhs_val;
+                            else if (strcmp(op, "<<=") == 0)
+                                res = cur << rhs_val;
+                            else if (strcmp(op, ">>=") == 0)
+                                res = cur >> rhs_val;
+                            update_symbol(target,
+                                          id_tok.value.str_val, res);
+                        }
+                        free_ast(rhs);
+                    }
+                }
+            }
+        }
+
+        if (first_iteration)
+        {
+            first_condition = condition;
+            first_block = block;
+            first_iteration = false;
+        }
+        else
+        {
+            free_ast(condition);
+            free_ast(block);
+        }
+    }
+
+    // Link AST: for_node->left = init (if any) -> cond -> block
+    if (init_node)
+    {
+        for_node->left = init_node;
+        // Walk to end of init's sibling chain (var decls can be chained
+        // via ','). Attach first_condition at the end.
+        Node *tail = init_node;
+        while (tail->right)
+            tail = tail->right;
+        tail->right = first_condition;
+    }
+    else
+    {
+        for_node->left = first_condition;
+    }
+    if (first_condition)
+        first_condition->right = first_block;
+
+    // --- Advance main parser index past the entire for statement ---
+    *i = cond_start_pos;
+
+    // Skip condition
+    if (strcmp(tokens[*i].value.str_val, ";") == 0)
+    {
+        (*i)++;
+    }
+    else
+    {
+        Node *skip_cond = parse_expression(tokens, i, num_tokens,
+                                           scope_stack, 0);
+        if (skip_cond)
+            free_ast(skip_cond);
+        if (*i < num_tokens && strcmp(tokens[*i].value.str_val, ";") == 0)
+            (*i)++;
+    }
+
+    // Skip post (to matching ')')
+    int depth = 1;
+    while (*i < num_tokens && depth > 0)
+    {
+        if (tokens[*i].type == SEPARATOR)
+        {
+            const char *s = tokens[*i].value.str_val;
+            if (s && strcmp(s, "(") == 0)
+                depth++;
+            else if (s && strcmp(s, ")") == 0)
+            {
+                depth--;
+                if (depth == 0)
+                    break;
+            }
+        }
+        (*i)++;
+    }
+    if (*i < num_tokens && strcmp(tokens[*i].value.str_val, ")") == 0)
+        (*i)++; // consume ')'
+
+    // Skip body block — NULL log so re-parse doesn't re-log.
+    Node *skip_block = parse_block(tokens, i, num_tokens, scope_stack, NULL,
+                                   false);
+    if (skip_block)
+        free_ast(skip_block);
+
+    // Pop the for-scope
+    pop_scope(scope_stack);
+    free_symbol_table(for_scope);
+
+    printf("[DEBUG] For loop completed: %d iterations unrolled\n",
+           iteration_count);
+
+    return for_node;
+}
+
 static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
-                             ScopeStack *scope_stack, Node **last_node_out,
-                             bool condition_active)
+                             ScopeStack *scope_stack, OutputLog *log,
+                             Node **last_node_out, bool condition_active)
 {
     if (*i >= num_tokens)
     {
@@ -1998,30 +2750,45 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
     }
     else if (token.type == KEYWORD && strcmp(token.value.str_val, "exit") == 0)
     {
-        stmt = parse_exit_statement(tokens, i, num_tokens, scope_stack);
+        stmt = parse_exit_statement(tokens, i, num_tokens, scope_stack,
+                                    log, condition_active);
+        last_node = stmt;
+    }
+    else if (token.type == KEYWORD &&
+             strcmp(token.value.str_val, "printf") == 0)
+    {
+        stmt = parse_printf_statement(tokens, i, num_tokens, scope_stack,
+                                      log, condition_active);
         last_node = stmt;
     }
     else if (token.type == KEYWORD &&
              ((strcmp(token.value.str_val, "if") == 0) ||
               (strcmp(token.value.str_val, "else") == 0)))
     {
-        stmt = parse_else_statement(tokens, i, num_tokens, scope_stack,
-                                    &last_node);
+        stmt = parse_else_statement(tokens, i, num_tokens, scope_stack, log,
+                                    &last_node, condition_active);
     }
     else if (token.type == KEYWORD &&
              strcmp(token.value.str_val, "while") == 0)
     {
-        stmt = parse_while_statement(tokens, i, num_tokens, scope_stack);
+        stmt = parse_while_statement(tokens, i, num_tokens, scope_stack, log);
         last_node = stmt;
     }
     else if (token.type == KEYWORD && strcmp(token.value.str_val, "do") == 0)
     {
-        stmt = parse_do_while_statement(tokens, i, num_tokens, scope_stack);
+        stmt = parse_do_while_statement(tokens, i, num_tokens, scope_stack,
+                                        log);
+        last_node = stmt;
+    }
+    else if (token.type == KEYWORD && strcmp(token.value.str_val, "for") == 0)
+    {
+        stmt = parse_for_statement(tokens, i, num_tokens, scope_stack, log);
         last_node = stmt;
     }
     else if (token.type == SEPARATOR && strcmp(token.value.str_val, "{") == 0)
     {
-        stmt = parse_block(tokens, i, num_tokens, scope_stack, condition_active);
+        stmt = parse_block(tokens, i, num_tokens, scope_stack, log,
+                           condition_active);
         last_node = stmt;
     }
     else if (token.type == IDENTIFIER &&
@@ -2056,7 +2823,8 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
 }
 
 static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
-                         ScopeStack *scope_stack, bool condition_active)
+                         ScopeStack *scope_stack, OutputLog *log,
+                         bool condition_active)
 {
     if (*i >= num_tokens)
     {
@@ -2113,7 +2881,7 @@ static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
 
         Node *last_node = NULL;
         Node *stmt = parse_statement(tokens, i, num_tokens, scope_stack,
-                                     &last_node, condition_active);
+                                     log, &last_node, condition_active);
 
         if (stmt)
         {
@@ -2140,7 +2908,7 @@ static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
 }
 
 // Main Parser
-Node *parse(Token *tokens, size_t num_tokens)
+Node *parse(Token *tokens, size_t num_tokens, OutputLog *log)
 {
     if (num_tokens == 0)
         return NULL;
@@ -2176,7 +2944,7 @@ Node *parse(Token *tokens, size_t num_tokens)
 
         // Default condition is true
         Node *stmt = parse_statement(tokens, &i, num_tokens, scope_stack,
-                                     &last_node, true);
+                                     log, &last_node, true);
         if (!stmt)
         {
             // If statement parsing failed, clean up and exit

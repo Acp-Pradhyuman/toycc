@@ -2,6 +2,7 @@
 #include "lexer/lexer.h"
 #include "parser/parser.h"
 #include "codegen/codegen.h"
+#include "output/output_log.h"
 
 int main(int argc, char *argv[])
 {
@@ -40,7 +41,8 @@ int main(int argc, char *argv[])
         print_token(tokens[i]);
     }
 
-    Node *root = parse(tokens, num_tokens);
+    OutputLog *log = output_log_create();
+    Node *root = parse(tokens, num_tokens, log);
 
     printf("\n--- Syntax Tree ---\n");
     // left child right sibling
@@ -49,10 +51,10 @@ int main(int argc, char *argv[])
     // Default output name if not provided
     char *output_name = (argc >= 3) ? argv[2] : "generated";
 
-    // Code Generation
+    // Code Generation — driven by the output log, not the AST.
     char asm_filename[256];
     snprintf(asm_filename, sizeof(asm_filename), "%s.asm", output_name);
-    generate_code(root, asm_filename);
+    generate_code(log, asm_filename);
 
     // Compilation Pipeline
     char nasm_cmd[256];
@@ -81,6 +83,7 @@ int main(int argc, char *argv[])
 cleanup:
     // Resource cleanup
     free_ast(root);
+    output_log_free(log);
     printf("\nExiting\n");
     free_tokens(tokens, num_tokens);
     fclose(file);

@@ -1,0 +1,49 @@
+int a = 5;
+
+// Simple if — condition true.
+if (a == 5) {
+    printf("branch1: a is 5\n");
+}
+
+// Simple if — condition false. Should NOT emit.
+if (a == 99) {
+    printf("DEAD: never emitted\n");
+}
+
+// if / else if / else — only the matching branch should emit.
+int b = 2;
+if (b == 1) {
+    printf("DEAD: b=1\n");
+} else if (b == 2) {
+    printf("branch2: b is 2\n");
+} else if (b == 3) {
+    printf("DEAD: b=3\n");
+} else {
+    printf("DEAD: fallback\n");
+}
+
+// if / else — else branch taken.
+if (b == 99) {
+    printf("DEAD: b=99\n");
+} else {
+    printf("branch3: else taken\n");
+}
+
+// Nested if — only the deepest active prints.
+if (a > 0) {
+    if (b > 0) {
+        printf("nested: both positive (a=%d, b=%d)\n", a, b);
+    } else {
+        printf("DEAD: nested else\n");
+    }
+}
+
+// Nested dead branch — nothing inside should fire.
+if (a < 0) {
+    printf("DEAD: outer false\n");
+    if (b == 2) {
+        printf("DEAD: inner true but outer dead\n");
+    }
+}
+
+exit(0);

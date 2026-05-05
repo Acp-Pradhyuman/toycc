@@ -1,17 +1,9 @@
 #ifndef CODEGEN_H
-// "If CODEGEN_H is not defined yet..."
 #define CODEGEN_H
-// "...define it now."
 
 #include <stdio.h>
-#include "../parser/parser.h"
+#include "../output/output_log.h"
 
-typedef enum {
-    SCOPE_GLOBAL,
-    SCOPE_CONTROL_FLOW  // Inside if/while/etc.
-} ScopeType;
-
-// int generate_code(Node *root, char *filename);
-int generate_code(Node *root, const char *filename);
+int generate_code(OutputLog *log, const char *filename);
 
 #endif // CODEGEN_H

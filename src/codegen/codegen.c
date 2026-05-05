@@ -1,161 +1,84 @@
 #include <assert.h>
-#include <string.h>
+#include <stdbool.h>
 #include "codegen.h"
 
-void traverse_tree(Node *node, FILE *file, ScopeType scope, bool *exit_emitted,
-                   bool active_block)
+// Emit the .data section by walking the log and writing each OUTPUT_WRITE's
+// bytes as a labeled byte sequence. The label `str_<i>` matches the index
+// in the log so the .text pass can reference it directly.
+static void emit_data_section(FILE *file, OutputLog *log)
 {
-    if (node == NULL || *exit_emitted)
-        return;
-
-    switch (node->type)
+    bool has_strings = false;
+    for (size_t i = 0; i < log->count; i++)
     {
-    case NODE_EXIT_CALL:
-        if (!*exit_emitted && active_block)
+        if (log->ops[i].kind == OUTPUT_WRITE)
         {
-            fprintf(file, "\tmov rax, 60\n");
-            if (node->left)
-                fprintf(file, "\tmov rdi, %d\n", node->left->value.int_val);
-            else
-                fprintf(file, "\tmov rdi, 0\n");
-            fprintf(file, "\tsyscall\n");
-            *exit_emitted = true;
+            has_strings = true;
+            break;
         }
+    }
+    if (!has_strings)
         return;
 
-    case NODE_IF_STATEMENT:
+    fprintf(file, "section .data\n");
+    for (size_t i = 0; i < log->count; i++)
     {
-        Node *cond = node->left;
-        Node *then_block = cond ? cond->right : NULL;
-        bool condition_active = false;
-
-        // Evaluate condition if possible
-        if (cond && cond->type == NODE_LITERAL_INT)
+        OutputOp *op = &log->ops[i];
+        if (op->kind != OUTPUT_WRITE)
+            continue;
+        fprintf(file, "str_%zu: db ", i);
+        for (size_t b = 0; b < op->len; b++)
         {
-            condition_active = (cond->value.int_val != 0);
+            fprintf(file, "%s%d",
+                    b ? "," : "",
+                    (unsigned char)op->bytes[b]);
         }
-
-        // Process then block if condition is true and we're in an active block
-        if (then_block && active_block && condition_active)
-        {
-            traverse_tree(then_block, file, scope, exit_emitted, true);
-        }
-
-        // Only process else/else if if the if condition was false and
-        // we're active
-        if (active_block && !condition_active)
-        {
-            Node *else_node = node->right;
-            bool found_active_else = false;
-
-            while (else_node && !found_active_else && !*exit_emitted)
-            {
-                switch (else_node->type)
-                {
-                case NODE_ELSE_IF_STATEMENT:
-                {
-                    Node *else_if_cond = else_node->left;
-                    Node *else_if_block =
-                        else_if_cond ? else_if_cond->right : NULL;
-                    bool else_if_active = false;
-
-                    if (else_if_cond && else_if_cond->type == NODE_LITERAL_INT)
-                    {
-                        else_if_active = (else_if_cond->value.int_val != 0);
-                    }
-                    else if (else_if_cond)
-                    {
-                        // For non-constant conditions, assume true
-                        else_if_active = true;
-                    }
-
-                    if (else_if_block && else_if_active)
-                    {
-                        traverse_tree(else_if_block, file, scope,
-                                      exit_emitted, true);
-                        // Found active else-if, skip rest
-                        found_active_else = true;
-                    }
-                    break;
-                }
-
-                case NODE_ELSE_STATEMENT:
-                    // Else block is always active if we get here
-                    traverse_tree(else_node->left, file, scope, 
-                        exit_emitted, true);
-                        // Found else, skip any remaining else-ifs
-                    found_active_else = true; 
-                    break;
-
-                default:
-                    break;
-                }
-
-                else_node = else_node->right;
-            }
-        }
-
-        // Continue with siblings
-        traverse_tree(node->right, file, scope, exit_emitted, active_block);
-        return;
+        fprintf(file, "\n");
     }
-
-    case NODE_WHILE_STATEMENT:
-    {
-        Node *cond = node->left;
-        Node *loop_block = cond ? cond->right : NULL;
-        bool condition_active = false;
-
-        if (cond && cond->type == NODE_LITERAL_INT)
-        {
-            condition_active = cond->value.int_val != 0;
-        }
-        // else if (cond && cond->type == NODE_IDENTIFIER)
-        // {
-        //     // or look up variable value if you track it
-        //     condition_active = true; 
-        // }
-        else if (cond)
-        {
-            condition_active = true; // assume true for non-literals
-        }
-
-        if (loop_block && active_block && condition_active)
-        {
-            traverse_tree(loop_block, file, scope, exit_emitted, true);
-        }
-
-        traverse_tree(node->right, file, scope, exit_emitted, active_block);
-        return;
-    }
-
-    default:
-        break;
-    }
-
-    traverse_tree(node->left, file, scope, exit_emitted, active_block);
-    traverse_tree(node->right, file, scope, exit_emitted, active_block);
 }
 
-int generate_code(Node *root, const char *filename)
+static void emit_text_section(FILE *file, OutputLog *log)
 {
-    FILE *file = fopen(filename, "w");
-    assert(file && "Failed to open output file");
-
     fprintf(file, "section .text\n");
     fprintf(file, "global _start\n");
     fprintf(file, "_start:\n");
 
     bool exit_emitted = false;
-    traverse_tree(root, file, SCOPE_GLOBAL, &exit_emitted, true);
+    for (size_t i = 0; i < log->count; i++)
+    {
+        OutputOp *op = &log->ops[i];
+        if (op->kind == OUTPUT_WRITE)
+        {
+            fprintf(file, "\tmov rax, 1\n");
+            fprintf(file, "\tmov rdi, 1\n");
+            fprintf(file, "\tlea rsi, [rel str_%zu]\n", i);
+            fprintf(file, "\tmov rdx, %zu\n", op->len);
+            fprintf(file, "\tsyscall\n");
+        }
+        else if (op->kind == OUTPUT_EXIT)
+        {
+            fprintf(file, "\tmov rax, 60\n");
+            fprintf(file, "\tmov rdi, %d\n", op->exit_code);
+            fprintf(file, "\tsyscall\n");
+            exit_emitted = true;
+            break; // Anything after a live exit is dead.
+        }
+    }
 
     if (!exit_emitted)
     {
-        // If no exit() present, emit default
         fprintf(file, "\tmov rax, 60\n");
         fprintf(file, "\tmov rdi, 0\n");
         fprintf(file, "\tsyscall\n");
     }
+}
+
+int generate_code(OutputLog *log, const char *filename)
+{
+    FILE *file = fopen(filename, "w");
+    assert(file && "Failed to open output file");
+
+    emit_data_section(file, log);
+    emit_text_section(file, log);
 
     fclose(file);
     return 0;

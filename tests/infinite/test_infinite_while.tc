@@ -1,0 +1,9 @@
+// Infinite while loop — compiler should terminate with the
+// iteration-cap error (MAX_LOOP_ITERATIONS) rather than hang forever.
+// Expected: exit code 1, stderr contains
+// "while loop exceeded 10000000 iterations".
+int i = 0;
+while (1) {
+    i += 1;
+}
+exit(i);

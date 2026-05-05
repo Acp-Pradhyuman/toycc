@@ -1,0 +1,48 @@
+// Uses if/else if/else, while, do-while, for, and printf variants all
+// in one file. Should print a predictable sequence, then exit with 7.
+
+int total = 0;
+
+// Preamble.
+printf("== starting ==\n");
+
+// if / else if / else chain, middle branch taken.
+int grade = 85;
+if (grade >= 90) {
+    printf("A\n");
+} else if (grade >= 80) {
+    printf("B (grade=%d)\n", grade);
+} else if (grade >= 70) {
+    printf("C\n");
+} else {
+    printf("F\n");
+}
+
+// while counts up.
+int w = 1;
+while (w <= 3) {
+    printf("w=%d\n", w);
+    total += w;
+    w += 1;
+}
+
+// do-while counts down from 2.
+int d = 2;
+do {
+    printf("d=%d\n", d);
+    total += d;
+    d -= 1;
+} while (d > 0);
+
+// for with nested if.
+for (int f = 0; f < 5; f += 1) {
+    if (f%2 == 1) {
+        printf("for-odd f=%d\n", f);
+    } else {
+        printf("for-even f=%d\n", f);
+    }
+    total += f;
+}
+
+printf("done, total=%d\n", total);
+exit(7);

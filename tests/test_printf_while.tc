@@ -1,0 +1,7 @@
+int i = 0;
+while (i < 4) {
+    printf("while iter %d\n", i);
+    i += 1;
+}
+printf("after while, i=%d\n", i);
+exit(0);

@@ -13,12 +13,14 @@ OUT = $(BUILD_DIR)/$(TARGET)
 SRC = 	src/main.c 				\
 		src/lexer/lexer.c		\
 		src/parser/parser.c		\
-		src/codegen/codegen.c
+		src/codegen/codegen.c	\
+		src/output/output_log.c
 
-OBJ = 	$(OBJ_DIR)/main.o		\
-		$(OBJ_DIR)/lexer.o		\
-		$(OBJ_DIR)/parser.o		\
-		$(OBJ_DIR)/codegen.o	
+OBJ = 	$(OBJ_DIR)/main.o			\
+		$(OBJ_DIR)/lexer.o			\
+		$(OBJ_DIR)/parser.o			\
+		$(OBJ_DIR)/codegen.o		\
+		$(OBJ_DIR)/output_log.o
 
 all: $(BUILD_DIR) $(OBJ_DIR) $(OUT)
 
@@ -43,6 +45,10 @@ $(OBJ_DIR)/parser.o: src/parser/parser.c
 # Compile codegen.c to object file
 $(OBJ_DIR)/codegen.o: src/codegen/codegen.c
 	$(CC) $(CFLAGS) -c src/codegen/codegen.c -o $(OBJ_DIR)/codegen.o
+
+# Compile output_log.c to object file
+$(OBJ_DIR)/output_log.o: src/output/output_log.c
+	$(CC) $(CFLAGS) -c src/output/output_log.c -o $(OBJ_DIR)/output_log.o
 
 # Link object files into executable
 $(OUT): $(OBJ)

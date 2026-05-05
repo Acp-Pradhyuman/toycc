@@ -1,0 +1,21 @@
+// Plain printf with no formatting.
+printf("Hello, world!\n");
+printf("Line 2\n");
+
+// %d with a literal, a variable, and an expression.
+int x = 42;
+int y = x * 2;
+printf("x = %d\n", x);
+printf("y = %d\n", y);
+printf("x + y = %d\n", x + y);
+
+// %s with a string literal argument.
+printf("greeting: %s\n", "hi there");
+
+// %% literal percent sign.
+printf("50%% off\n");
+
+// Mixed.
+printf("x=%d y=%d sum=%d\n", x, y, x + y);
+
+exit(0);

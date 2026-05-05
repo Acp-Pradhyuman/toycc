@@ -1,0 +1,15 @@
+// Normal do-while: runs 3 times.
+int j = 0;
+do {
+    printf("dowhile j=%d\n", j);
+    j += 1;
+} while (j < 3);
+
+// do-while with initial false condition: should still print once.
+int k = 10;
+do {
+    printf("runs-once k=%d\n", k);
+    k += 1;
+} while (k < 5);
+
+exit(0);

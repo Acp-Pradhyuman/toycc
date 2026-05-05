@@ -151,6 +151,20 @@ void print_token(Token token)
     case OPERATOR:
         printf("Token(OPERATOR): %s\n", token.value.str_val);
         break;
+    case STRING_LITERAL:
+        printf("Token(STRING_LITERAL): \"");
+        for (size_t b = 0; b < token.str_len; b++)
+        {
+            unsigned char c = (unsigned char)token.value.str_val[b];
+            if (c == '\n') printf("\\n");
+            else if (c == '\t') printf("\\t");
+            else if (c == '\\') printf("\\\\");
+            else if (c == '"') printf("\\\"");
+            else if (c == '\0') printf("\\0");
+            else printf("%c", c);
+        }
+        printf("\"\n");
+        break;
     default:
         printf("Unknown token type\n");
         break;
@@ -263,7 +277,8 @@ void free_tokens(Token *tokens, size_t num_tokens)
         if (tokens[i].type == KEYWORD ||
             tokens[i].type == SEPARATOR ||
             tokens[i].type == IDENTIFIER ||
-            tokens[i].type == OPERATOR)
+            tokens[i].type == OPERATOR ||
+            tokens[i].type == STRING_LITERAL)
         {
             if (tokens[i].value.str_val)
             {
@@ -508,6 +523,99 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             tokens[count++] = token;
         }
 
+        else if (ch == '"')
+        {
+            // String literal. Supports \n, \t, \\, \", \0 escapes.
+            int start_col = col;
+            size_t cap = 32;
+            size_t len = 0;
+            char *buf = malloc(cap);
+            if (!buf)
+            {
+                fprintf(stderr, "lexer: malloc failed\n");
+                exit(EXIT_FAILURE);
+            }
+
+            int str_start_line = line;
+            int c;
+            while ((c = fgetc(file)) != EOF && c != '"')
+            {
+                col++;
+                if (c == '\n')
+                {
+                    line++;
+                    col = 0;
+                }
+
+                char out;
+                if (c == '\\')
+                {
+                    int esc = fgetc(file);
+                    col++;
+                    switch (esc)
+                    {
+                    case 'n':  out = '\n'; break;
+                    case 't':  out = '\t'; break;
+                    case 'r':  out = '\r'; break;
+                    case '\\': out = '\\'; break;
+                    case '"':  out = '"';  break;
+                    case '0':  out = '\0'; break;
+                    case EOF:
+                        fprintf(stderr,
+                                "ERROR: Unterminated string literal at "
+                                "line %d, col %d\n",
+                                str_start_line, start_col);
+                        free(buf);
+                        exit(EXIT_FAILURE);
+                    default:
+                        fprintf(stderr,
+                                "ERROR: Unknown escape '\\%c' at line %d\n",
+                                esc, line);
+                        free(buf);
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                else
+                {
+                    out = (char)c;
+                }
+
+                if (len + 1 > cap)
+                {
+                    cap *= 2;
+                    char *nb = realloc(buf, cap);
+                    if (!nb)
+                    {
+                        fprintf(stderr, "lexer: realloc failed\n");
+                        free(buf);
+                        exit(EXIT_FAILURE);
+                    }
+                    buf = nb;
+                }
+                buf[len++] = out;
+            }
+
+            if (c != '"')
+            {
+                fprintf(stderr,
+                        "ERROR: Unterminated string literal at line %d, col %d\n",
+                        str_start_line, start_col);
+                free(buf);
+                exit(EXIT_FAILURE);
+            }
+            col++; // consume closing quote
+
+            Token token;
+            token.type = STRING_LITERAL;
+            token.value.str_val = buf; // already malloc'd; owned by token
+            token.str_len = len;
+            token.col = start_col;
+            token.line = str_start_line;
+            printf("Found string literal (%zu bytes) at line %d and col %d\n",
+                   len, str_start_line, start_col);
+            tokens[count++] = token;
+        }
+
         else if (isdigit(ch))
         {
             int start_col = col;
@@ -536,7 +644,9 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
                 strcmp(buffer, "if") == 0 ||
                 strcmp(buffer, "else") == 0 ||
                 strcmp(buffer, "while") == 0 ||
-                strcmp(buffer, "do") == 0)
+                strcmp(buffer, "do") == 0 ||
+                strcmp(buffer, "for") == 0 ||
+                strcmp(buffer, "printf") == 0)
             {
                 token.type = KEYWORD;
                 token.value.str_val = strdup(buffer);

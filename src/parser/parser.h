@@ -4,6 +4,7 @@
 // "...define it now."
 
 #include "../lexer/lexer.h"
+#include "../output/output_log.h"
 
 typedef enum
 {
@@ -15,6 +16,8 @@ typedef enum
     NODE_ELSE_STATEMENT,
     NODE_WHILE_STATEMENT,
     NODE_DO_WHILE_STATEMENT,
+    NODE_FOR_STATEMENT,
+    NODE_PRINTF_CALL,
     NODE_IDENTIFIER,
     NODE_STATEMENT_END,
     NODE_UNKNOWN,
@@ -73,7 +76,7 @@ typedef struct ScopeStack
     size_t capacity;
 } ScopeStack;
 
-Node *parse(Token *tokens, size_t num_tokens);
+Node *parse(Token *tokens, size_t num_tokens, OutputLog *log);
 void free_ast(Node *node);
 
 // left child right sibling
