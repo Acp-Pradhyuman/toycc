@@ -1,0 +1,10 @@
+// continue skips the printf on i==3 only. Expected: "0, 1, 2, 4, "
+// followed by newline. i=3 is consumed by continue; loop resumes at i=4.
+for(int i=0; i<5; i+=1) {
+    if(i==3) {
+        continue;
+    }
+    printf("%d, ", i);
+}
+printf("\n");
+exit(0);

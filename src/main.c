@@ -1,8 +1,10 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include "lexer/lexer.h"
 #include "parser/parser.h"
 #include "codegen/codegen.h"
 #include "output/output_log.h"
+#include "error/error.h"
 
 int main(int argc, char *argv[])
 {
@@ -17,6 +19,24 @@ int main(int argc, char *argv[])
     {
         perror("Failed to open file");
         return 1;
+    }
+
+    // Slurp entire source into a buffer so error_at() can show context.
+    // We also rewind so the lexer still sees the full content.
+    fseek(file, 0, SEEK_END);
+    long fsize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    char *source_text = NULL;
+    if (fsize >= 0)
+    {
+        source_text = malloc((size_t)fsize + 1);
+        if (source_text)
+        {
+            size_t got = fread(source_text, 1, (size_t)fsize, file);
+            source_text[got] = '\0';
+            rewind(file);
+            error_set_source(argv[1], source_text);
+        }
     }
 
     size_t num_tokens = 0;
@@ -87,5 +107,6 @@ cleanup:
     printf("\nExiting\n");
     free_tokens(tokens, num_tokens);
     fclose(file);
+    free(source_text);
     return 0;
 }

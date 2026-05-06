@@ -1,0 +1,9 @@
+// Positive case: const works like int, can be read, used in expressions.
+const int MAX = 100;
+const char LF = '\n';
+
+int x = MAX / 2;
+printf("MAX=%d half=%d\n", MAX, x);
+printf("A%c", LF);
+
+exit(x);  // 50

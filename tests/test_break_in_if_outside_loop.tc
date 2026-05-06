@@ -1,0 +1,7 @@
+// Negative test: break inside an if, outside any loop. The if body
+// is live but there's no enclosing loop — must error.
+int x = 1;
+if (x == 1) {
+    break;
+}
+exit(0);

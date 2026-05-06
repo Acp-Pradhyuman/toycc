@@ -2,6 +2,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "parser.h"
+#include "../error/error.h"
 
 // Hard cap on loop-unroll iterations. Since loops are simulated at
 // compile time, a runtime-style infinite loop would hang the compiler.
@@ -16,6 +17,7 @@ static Node *parse_primary(Token *tokens, size_t *i, size_t num_tokens,
                            ScopeStack *scope_stack);
 static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
                          ScopeStack *scope_stack, OutputLog *log,
+                         LoopControl *lc,
                          bool condition_active);
 
 void debugPrintNode(const char *prefix, Node *node)
@@ -100,6 +102,7 @@ static void add_symbol(SymbolTable *table, const char *name, VarType type,
     table->symbols[table->size].value = value;
     table->symbols[table->size].line = line;
     table->symbols[table->size].col = col;
+    table->symbols[table->size].is_const = 0;
     table->size++;
 }
 
@@ -264,7 +267,8 @@ static Node *createNodeFromToken(Token token)
         {
             type = NODE_IF_STATEMENT;
         }
-        else if (strcmp(token.value.str_val, "int") == 0)
+        else if (strcmp(token.value.str_val, "int") == 0 ||
+                 strcmp(token.value.str_val, "char") == 0)
         {
             type = NODE_TYPE_SPECIFIER;
         }
@@ -469,6 +473,69 @@ static Node *parse_primary(Token *tokens, size_t *i, size_t num_tokens,
 
     Token token = tokens[*i];
 
+    // Unary operators: !x, ~x, -x. Bind tighter than any binary operator.
+    if (token.type == OPERATOR &&
+        (strcmp(token.value.str_val, "!") == 0 ||
+         strcmp(token.value.str_val, "~") == 0 ||
+         strcmp(token.value.str_val, "-") == 0))
+    {
+        Token op = token;
+        (*i)++;
+        Node *operand = parse_primary(tokens, i, num_tokens, scope_stack);
+        if (!operand)
+        {
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+
+        // Resolve operand to an integer if possible (literal or identifier).
+        int have_int = 0;
+        int operand_val = 0;
+        if (operand->type == NODE_LITERAL_INT)
+        {
+            have_int = 1;
+            operand_val = operand->value.int_val;
+        }
+        else if (operand->type == NODE_IDENTIFIER)
+        {
+            Symbol *sym = find_symbol_in_scope_stack(scope_stack,
+                                                     operand->value.str_val);
+            if (sym)
+            {
+                have_int = 1;
+                operand_val = sym->value;
+            }
+        }
+
+        if (have_int)
+        {
+            int result;
+            if (strcmp(op.value.str_val, "!") == 0)
+                result = !operand_val;
+            else if (strcmp(op.value.str_val, "~") == 0)
+                result = ~operand_val;
+            else
+                result = -operand_val;
+
+            free_ast(operand);
+            Node *folded = createNode(NODE_LITERAL_INT, NULL, op.line, op.col);
+            if (!folded)
+            {
+                free_scope_stack(scope_stack);
+                free_tokens(tokens, num_tokens);
+                exit(1);
+            }
+            folded->value.int_val = result;
+            return folded;
+        }
+
+        // Fallback: keep as binary expression with 0 as left operand for
+        // unary minus, or leave unfolded. For toycc, identifiers always
+        // resolve, so this path is rarely hit.
+        return operand;
+    }
+
     if (token.type == INT || token.type == IDENTIFIER)
     {
         (*i)++;
@@ -487,12 +554,8 @@ static Node *parse_primary(Token *tokens, size_t *i, size_t num_tokens,
                                                      token.value.str_val);
             if (!sym)
             {
-                printf("Error: Undefined variable '%s' at line %d\n",
-                       token.value.str_val, token.line);
-                free_ast(node);
-                free_scope_stack(scope_stack);
-                free_tokens(tokens, num_tokens);
-                exit(1);
+                error_at(token.line, token.col,
+                         "undefined variable '%s'", token.value.str_val);
             }
             if (sym->type == VAR_INT)
             {
@@ -605,6 +668,82 @@ Node *parse_expression(Token *tokens, size_t *i, size_t num_tokens,
         }
     }
 
+    // Ternary: cond ? then_expr : else_expr. Only at top level
+    // (min_precedence == 0) so it sits at the bottom of the precedence
+    // ladder. Right-associative by calling parse_expression recursively.
+    if (min_precedence == 0 &&
+        *i < num_tokens &&
+        tokens[*i].type == OPERATOR &&
+        strcmp(tokens[*i].value.str_val, "?") == 0)
+    {
+        (*i)++; // consume '?'
+
+        Node *then_expr = parse_expression(tokens, i, num_tokens,
+                                           scope_stack, 0);
+        if (!then_expr)
+        {
+            free_ast(left);
+            return NULL;
+        }
+
+        if (*i >= num_tokens ||
+            tokens[*i].type != OPERATOR ||
+            strcmp(tokens[*i].value.str_val, ":") != 0)
+        {
+            printf("Error: Expected ':' in ternary at line %d\n",
+                   tokens[*i >= num_tokens ? *i - 1 : *i].line);
+            free_ast(left);
+            free_ast(then_expr);
+            free_scope_stack(scope_stack);
+            free_tokens(tokens, num_tokens);
+            exit(1);
+        }
+        (*i)++; // consume ':'
+
+        Node *else_expr = parse_expression(tokens, i, num_tokens,
+                                           scope_stack, 0);
+        if (!else_expr)
+        {
+            free_ast(left);
+            free_ast(then_expr);
+            return NULL;
+        }
+
+        // Resolve condition if possible; pick branch at parse time.
+        int cond_known = 0;
+        int cond_val = 0;
+        if (left->type == NODE_LITERAL_INT)
+        {
+            cond_known = 1;
+            cond_val = left->value.int_val;
+        }
+        else if (left->type == NODE_IDENTIFIER)
+        {
+            Symbol *sym = find_symbol_in_scope_stack(scope_stack,
+                                                     left->value.str_val);
+            if (sym)
+            {
+                cond_known = 1;
+                cond_val = sym->value;
+            }
+        }
+
+        if (cond_known)
+        {
+            Node *picked = cond_val ? then_expr : else_expr;
+            Node *discarded = cond_val ? else_expr : then_expr;
+            free_ast(left);
+            free_ast(discarded);
+            return picked;
+        }
+
+        // Non-constant condition: just return then_expr as a best-effort.
+        // (Shouldn't happen in toycc's partial-evaluator model.)
+        free_ast(left);
+        free_ast(else_expr);
+        return then_expr;
+    }
+
     return left;
 }
 
@@ -615,15 +754,26 @@ static Node *parse_variable_declaration(Token *tokens, size_t *i,
                                         Node **last_decl_out,
                                         bool condition_active)
 {
-    if (*i >= num_tokens || tokens[*i].type != KEYWORD ||
-        strcmp(tokens[*i].value.str_val, "int") != 0)
+    // Optional 'const' prefix — binds to all identifiers declared here.
+    bool is_const = false;
+    if (*i < num_tokens && tokens[*i].type == KEYWORD &&
+        strcmp(tokens[*i].value.str_val, "const") == 0)
     {
-        printf("Error: Expected 'int' keyword at line %d\n", tokens[*i].line);
+        is_const = true;
+        (*i)++;
+    }
+
+    if (*i >= num_tokens || tokens[*i].type != KEYWORD ||
+        (strcmp(tokens[*i].value.str_val, "int") != 0 &&
+         strcmp(tokens[*i].value.str_val, "char") != 0))
+    {
+        printf("Error: Expected 'int' or 'char' keyword at line %d\n",
+               tokens[*i].line);
         free_scope_stack(scope_stack);
         free_tokens(tokens, num_tokens);
         exit(1);
     }
-    (*i)++;
+    (*i)++; // consume type keyword (both int and char store as VAR_INT)
 
     Node *first_decl = NULL;
     Node *current_decl = NULL;
@@ -644,10 +794,12 @@ static Node *parse_variable_declaration(Token *tokens, size_t *i,
 
         Node *init_expr = NULL;
         int initial_value = 0;
+        bool has_initializer = false;
 
         if (*i < num_tokens && strcmp(tokens[*i].value.str_val, "=") == 0)
         {
             (*i)++;
+            has_initializer = true;
             init_expr = parse_expression(tokens, i, num_tokens, scope_stack, 0);
             if (!init_expr)
             {
@@ -671,11 +823,23 @@ static Node *parse_variable_declaration(Token *tokens, size_t *i,
             }
         }
 
+        if (is_const && !has_initializer)
+        {
+            error_at(id_token.line, id_token.col,
+                     "'const' variable '%s' requires an initializer",
+                     id_token.value.str_val);
+        }
+
         // Only add symbol if the condition is active
         if (condition_active)
         {
             add_symbol(current_table, id_token.value.str_val, VAR_INT,
                        initial_value, id_token.line, id_token.col);
+            if (is_const)
+            {
+                // Mark the symbol we just added as const.
+                current_table->symbols[current_table->size - 1].is_const = 1;
+            }
         }
 
         Node *decl_node = createNode(NODE_VAR_DECL, id_token.value.str_val,
@@ -765,11 +929,19 @@ static Node *parse_assignment_statement(Token *tokens, size_t *i,
     }
     if (!target_table)
     {
-        printf("Error: Undefined variable '%s' at line %d\n",
-               id_token.value.str_val, id_token.line);
-        free_scope_stack(scope_stack);
-        free_tokens(tokens, num_tokens);
-        exit(1);
+        error_at(id_token.line, id_token.col,
+                 "undefined variable '%s'", id_token.value.str_val);
+    }
+
+    // Refuse to assign to a const. Check once here, before parsing RHS.
+    {
+        Symbol *target = find_symbol(target_table, id_token.value.str_val);
+        if (target && target->is_const)
+        {
+            error_at(id_token.line, id_token.col,
+                     "assignment to const variable '%s'",
+                     id_token.value.str_val);
+        }
     }
 
     if (*i >= num_tokens || tokens[*i].type != OPERATOR ||
@@ -1291,6 +1463,45 @@ static Node *parse_printf_statement(Token *tokens, size_t *i,
             for (size_t k = 0; k < s.str_len; k++)
                 out[len++] = s.value.str_val[k];
         }
+        else if (spec == 'c')
+        {
+            // %c takes an int argument and emits a single byte.
+            Node *arg = parse_expression(tokens, i, num_tokens,
+                                         scope_stack, 0);
+            if (!arg)
+            {
+                free(out);
+                free_ast(printf_node);
+                free_scope_stack(scope_stack);
+                free_tokens(tokens, num_tokens);
+                exit(1);
+            }
+            int val = 0;
+            if (arg->type == NODE_LITERAL_INT)
+            {
+                val = arg->value.int_val;
+            }
+            else if (arg->type == NODE_IDENTIFIER)
+            {
+                Symbol *sym = find_symbol_in_scope_stack(
+                    scope_stack, arg->value.str_val);
+                if (!sym)
+                {
+                    printf("Error: Undefined variable '%s' at line %d\n",
+                           arg->value.str_val, arg->line);
+                    free_ast(arg);
+                    free(out);
+                    free_ast(printf_node);
+                    free_scope_stack(scope_stack);
+                    free_tokens(tokens, num_tokens);
+                    exit(1);
+                }
+                val = sym->value;
+            }
+            free_ast(arg);
+            ENSURE(1);
+            out[len++] = (char)(val & 0xFF);
+        }
         else
         {
             printf("Error: printf: unsupported conversion '%%%c' at line %d\n",
@@ -1404,6 +1615,14 @@ void treeTraversal(Node *node, int depth)
             printf("PRINTF_CALL\n");
             break;
 
+        case NODE_BREAK:
+            printf("BREAK\n");
+            break;
+
+        case NODE_CONTINUE:
+            printf("CONTINUE\n");
+            break;
+
         case NODE_IF_STATEMENT:
             printf("IF_STATEMENT\n");
 
@@ -1487,6 +1706,7 @@ void treeTraversal(Node *node, int depth)
 
 static Node *parse_if_statement(Token *tokens, size_t *i, size_t num_tokens,
                                 ScopeStack *scope_stack, OutputLog *log,
+                                LoopControl *lc,
                                 Node **last_node_out,
                                 bool outer_condition_active)
 {
@@ -1548,6 +1768,7 @@ static Node *parse_if_statement(Token *tokens, size_t *i, size_t num_tokens,
     // Parse then block with the condition status. Gate on outer scope too:
     // a nested if inside a dead branch must stay dead.
     Node *then_block = parse_block(tokens, i, num_tokens, scope_stack, log,
+                                   lc,
                                    outer_condition_active && condition_active);
     if (!then_block)
     {
@@ -1587,6 +1808,7 @@ static Node *parse_if_statement(Token *tokens, size_t *i, size_t num_tokens,
 static Node *parse_else_if_statements(Token *tokens, size_t *i,
                                       size_t num_tokens,
                                       ScopeStack *scope_stack, OutputLog *log,
+                                      LoopControl *lc,
                                       Node *if_node,
                                       bool outer_condition_active,
                                       bool prev_condition_active,
@@ -1667,7 +1889,7 @@ static Node *parse_else_if_statements(Token *tokens, size_t *i,
 
         // Parse then block. Gate on outer scope too.
         Node *else_if_block = parse_block(tokens, i, num_tokens,
-                                          scope_stack, log,
+                                          scope_stack, log, lc,
                                           outer_condition_active &&
                                               condition_active);
         if (!else_if_block)
@@ -1713,6 +1935,7 @@ static Node *parse_else_if_statements(Token *tokens, size_t *i,
 
 static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
                                   ScopeStack *scope_stack, OutputLog *log,
+                                  LoopControl *lc,
                                   Node **last_node_out,
                                   bool outer_condition_active)
 {
@@ -1740,7 +1963,7 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
     // Now parse the required if statement first
     Node *if_node = parse_if_statement(tokens, i, num_tokens,
-                                       scope_stack, log, NULL,
+                                       scope_stack, log, lc, NULL,
                                        outer_condition_active);
     if (!if_node)
     {
@@ -1771,7 +1994,7 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
     // Now parse any else if statements and get the last one
     Node *last_else_if = NULL;
-    parse_else_if_statements(tokens, i, num_tokens, scope_stack, log,
+    parse_else_if_statements(tokens, i, num_tokens, scope_stack, log, lc,
                              if_node, outer_condition_active,
                              any_condition_active, &last_else_if);
 
@@ -1820,6 +2043,7 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
         // Parse else block. Gate on outer scope.
         Node *else_block = parse_block(tokens, i, num_tokens, scope_stack, log,
+                                       lc,
                                        outer_condition_active && else_active);
         if (!else_block)
         {
@@ -1869,7 +2093,8 @@ static Node *parse_else_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 // DO-WHILE LOOP PARSER
 Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
-                               ScopeStack *scope_stack, OutputLog *log)
+                               ScopeStack *scope_stack, OutputLog *log,
+                               bool outer_condition_active)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -1893,6 +2118,12 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     bool first_iteration = true;
 
     int iteration_count = 0;
+    LoopControl my_lc = {0, 0};
+
+    // If we're inside a dead branch, skip simulation entirely and just
+    // advance past the do-while construct.
+    if (!outer_condition_active)
+        goto skip_simulation;
 
     do
     {
@@ -1915,9 +2146,11 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
                "at token index %zu\n",
                iteration_count, temp_i);
 
-        // Parse block first (this is the key difference from while loop)
+        // Parse block first (this is the key difference from while loop).
+        // Reset continue flag per-iteration (it only affects *this* trip).
+        my_lc.continuing = 0;
         Node *block = parse_block(tokens, &temp_i, num_tokens,
-                                  scope_stack, log, condition_active);
+                                  scope_stack, log, &my_lc, condition_active);
         if (!block)
         {
             printf("Error: Failed to parse do-while block\n");
@@ -2094,6 +2327,13 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
                    iteration_count);
         }
 
+        // If body executed a `break;`, exit the loop unconditionally.
+        if (my_lc.breaking)
+        {
+            my_lc.breaking = 0;
+            break;
+        }
+
     } while (condition_active);
 
     // Link ONLY the first iteration nodes to the do_while_node AST
@@ -2103,13 +2343,14 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     if (first_block)
         first_block->right = first_condition;
 
+skip_simulation:
     // Advance parser index past the entire do-while statement
     *i = block_start_pos;
 
     // Skip past block parsing. Pass a throwaway log (NULL) so re-parses
     // for index-advancing don't re-log output.
     Node *temp_block = parse_block(tokens, i, num_tokens, scope_stack, NULL,
-                                   false);
+                                   NULL, false);
     if (temp_block)
     {
         free_ast(temp_block); // Free the temporary block
@@ -2158,7 +2399,8 @@ Node *parse_do_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 // WHILE LOOP PARSER
 Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
-                            ScopeStack *scope_stack, OutputLog *log)
+                            ScopeStack *scope_stack, OutputLog *log,
+                            bool outer_condition_active)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -2192,6 +2434,11 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     bool first_iteration = true;
 
     int iteration_count = 0;
+    LoopControl my_lc = {0, 0};
+
+    // If we're inside a dead branch, skip simulation entirely.
+    if (!outer_condition_active)
+        goto skip_simulation;
 
     while (condition_active)
     {
@@ -2260,9 +2507,11 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 
         printf("[DEBUG] Parsing block starting at token index %zu\n", temp_i);
 
-        // Parse block - this updates symbol table for semantic analysis
+        // Parse block - this updates symbol table for semantic analysis.
+        // Reset continue flag per-iteration.
+        my_lc.continuing = 0;
         Node *block = parse_block(tokens, &temp_i, num_tokens, scope_stack,
-                                  log, condition_active);
+                                  log, &my_lc, condition_active);
         if (!block)
         {
             printf("Error: Failed to parse while block\n");
@@ -2291,6 +2540,13 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
                    "(kept symbol table effects)\n",
                    iteration_count);
         }
+
+        // If body executed a `break;`, exit the loop unconditionally.
+        if (my_lc.breaking)
+        {
+            my_lc.breaking = 0;
+            break;
+        }
     }
 
     // Link ONLY the first iteration nodes to the while_node AST
@@ -2298,6 +2554,7 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
     if (first_condition)
         first_condition->right = first_block;
 
+skip_simulation:
     // Advance parser index past the entire while statement
     *i = loop_start_pos;
 
@@ -2316,7 +2573,7 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 
     // Skip past block parsing — pass NULL log so skip doesn't re-log.
     Node *temp_block = parse_block(tokens, i, num_tokens, scope_stack, NULL,
-                                   false);
+                                   NULL, false);
     if (temp_block)
     {
         free_ast(temp_block); // Free the temporary block
@@ -2336,7 +2593,8 @@ Node *parse_while_statement(Token *tokens, size_t *i, size_t num_tokens,
 // side-effects on the symbol table, matching the existing while/do-while
 // simulation model.
 Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
-                          ScopeStack *scope_stack, OutputLog *log)
+                          ScopeStack *scope_stack, OutputLog *log,
+                          bool outer_condition_active)
 {
     int start_line = tokens[*i].line;
     int start_col = tokens[*i].col;
@@ -2372,18 +2630,21 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
         (*i)++; // empty init, consume ';'
     }
     else if (tokens[*i].type == KEYWORD &&
-             strcmp(tokens[*i].value.str_val, "int") == 0)
+             (strcmp(tokens[*i].value.str_val, "int") == 0 ||
+              strcmp(tokens[*i].value.str_val, "char") == 0 ||
+              strcmp(tokens[*i].value.str_val, "const") == 0))
     {
+        // Always declare the var symbol (even if the loop is dead) so the
+        // throwaway re-parse can still resolve identifiers in the header.
         Node *last = NULL;
         init_node = parse_variable_declaration(tokens, i, num_tokens,
                                                scope_stack, &last, true);
-        // parse_variable_declaration consumes the trailing ';'
     }
     else if (tokens[*i].type == IDENTIFIER)
     {
         init_node = parse_assignment_statement(tokens, i, num_tokens,
-                                               scope_stack, true);
-        // parse_assignment_statement consumes the trailing ';'
+                                               scope_stack,
+                                               outer_condition_active);
     }
     else
     {
@@ -2420,6 +2681,10 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
     bool first_iteration = true;
     bool condition_active = true;
     int iteration_count = 0;
+    LoopControl my_lc = {0, 0};
+
+    if (!outer_condition_active)
+        goto skip_simulation;
 
     while (condition_active)
     {
@@ -2473,8 +2738,11 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
             if (temp_i >= num_tokens ||
                 strcmp(tokens[temp_i].value.str_val, ";") != 0)
             {
-                printf("Error: Expected ';' after for condition at line %d\n",
-                       tokens[temp_i - 1].line);
+                int eline = tokens[temp_i < num_tokens ? temp_i : temp_i - 1].line;
+                int ecol = tokens[temp_i < num_tokens ? temp_i : temp_i - 1].col;
+                error_at(eline, ecol,
+                         "expected ';' after for condition");
+                // unreachable — kept for ownership clarity:
                 free_ast(condition);
                 free_ast(init_node);
                 free_ast(for_node);
@@ -2553,8 +2821,10 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
         temp_i++; // consume ')'
 
         // --- Parse body block ---
+        // Reset continue flag per-iteration (break stays set until handled).
+        my_lc.continuing = 0;
         Node *block = parse_block(tokens, &temp_i, num_tokens,
-                                  scope_stack, log, true);
+                                  scope_stack, log, &my_lc, true);
         if (!block)
         {
             free_ast(condition);
@@ -2565,6 +2835,24 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
             free_scope_stack(scope_stack);
             free_tokens(tokens, num_tokens);
             exit(1);
+        }
+
+        // If body executed `break;`, skip the post clause and exit loop.
+        if (my_lc.breaking)
+        {
+            my_lc.breaking = 0;
+            if (first_iteration)
+            {
+                first_condition = condition;
+                first_block = block;
+                first_iteration = false;
+            }
+            else
+            {
+                free_ast(condition);
+                free_ast(block);
+            }
+            break;
         }
 
         // --- Execute post (for symbol-table side effects) ---
@@ -2675,6 +2963,19 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
     if (first_condition)
         first_condition->right = first_block;
 
+    goto after_link;
+
+skip_simulation:
+    // Dead-branch for-loop: nothing useful to put on the AST. init_node
+    // was built for scoping (to declare loop-header vars so header
+    // re-parse finds them) but is orphaned; free it to avoid a leak.
+    if (init_node)
+    {
+        free_ast(init_node);
+        init_node = NULL;
+    }
+
+after_link:
     // --- Advance main parser index past the entire for statement ---
     *i = cond_start_pos;
 
@@ -2716,7 +3017,7 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
 
     // Skip body block — NULL log so re-parse doesn't re-log.
     Node *skip_block = parse_block(tokens, i, num_tokens, scope_stack, NULL,
-                                   false);
+                                   NULL, false);
     if (skip_block)
         free_ast(skip_block);
 
@@ -2732,6 +3033,7 @@ Node *parse_for_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
                              ScopeStack *scope_stack, OutputLog *log,
+                             LoopControl *lc,
                              Node **last_node_out, bool condition_active)
 {
     if (*i >= num_tokens)
@@ -2743,7 +3045,10 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
     Node *stmt = NULL;
     Node *last_node = NULL;
 
-    if (token.type == KEYWORD && strcmp(token.value.str_val, "int") == 0)
+    if (token.type == KEYWORD &&
+        (strcmp(token.value.str_val, "int") == 0 ||
+         strcmp(token.value.str_val, "char") == 0 ||
+         strcmp(token.value.str_val, "const") == 0))
     {
         stmt = parse_variable_declaration(tokens, i, num_tokens, scope_stack,
                                           &last_node, condition_active);
@@ -2762,33 +3067,71 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
         last_node = stmt;
     }
     else if (token.type == KEYWORD &&
+             (strcmp(token.value.str_val, "break") == 0 ||
+              strcmp(token.value.str_val, "continue") == 0))
+    {
+        bool is_break = strcmp(token.value.str_val, "break") == 0;
+        int kw_line = token.line;
+        int kw_col = token.col;
+        (*i)++;
+        if (*i >= num_tokens || tokens[*i].type != SEPARATOR ||
+            strcmp(tokens[*i].value.str_val, ";") != 0)
+        {
+            error_at(kw_line, kw_col, "expected ';' after '%s'",
+                     is_break ? "break" : "continue");
+        }
+        (*i)++;
+        // Only enforce "outside of loop" when this code is actually live.
+        // The throwaway re-parse pass in loop simulators runs with
+        // condition_active=false and lc=NULL; it shouldn't error.
+        if (condition_active)
+        {
+            if (!lc)
+            {
+                error_at(kw_line, kw_col,
+                         "'%s' used outside of loop",
+                         is_break ? "break" : "continue");
+            }
+            if (is_break)
+                lc->breaking = 1;
+            else
+                lc->continuing = 1;
+        }
+        stmt = createNode(is_break ? NODE_BREAK : NODE_CONTINUE,
+                          is_break ? "break" : "continue",
+                          kw_line, kw_col);
+        last_node = stmt;
+    }
+    else if (token.type == KEYWORD &&
              ((strcmp(token.value.str_val, "if") == 0) ||
               (strcmp(token.value.str_val, "else") == 0)))
     {
         stmt = parse_else_statement(tokens, i, num_tokens, scope_stack, log,
-                                    &last_node, condition_active);
+                                    lc, &last_node, condition_active);
     }
     else if (token.type == KEYWORD &&
              strcmp(token.value.str_val, "while") == 0)
     {
-        stmt = parse_while_statement(tokens, i, num_tokens, scope_stack, log);
+        stmt = parse_while_statement(tokens, i, num_tokens, scope_stack, log,
+                                     condition_active);
         last_node = stmt;
     }
     else if (token.type == KEYWORD && strcmp(token.value.str_val, "do") == 0)
     {
         stmt = parse_do_while_statement(tokens, i, num_tokens, scope_stack,
-                                        log);
+                                        log, condition_active);
         last_node = stmt;
     }
     else if (token.type == KEYWORD && strcmp(token.value.str_val, "for") == 0)
     {
-        stmt = parse_for_statement(tokens, i, num_tokens, scope_stack, log);
+        stmt = parse_for_statement(tokens, i, num_tokens, scope_stack, log,
+                                   condition_active);
         last_node = stmt;
     }
     else if (token.type == SEPARATOR && strcmp(token.value.str_val, "{") == 0)
     {
         stmt = parse_block(tokens, i, num_tokens, scope_stack, log,
-                           condition_active);
+                           lc, condition_active);
         last_node = stmt;
     }
     else if (token.type == IDENTIFIER &&
@@ -2824,6 +3167,7 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
 
 static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
                          ScopeStack *scope_stack, OutputLog *log,
+                         LoopControl *lc,
                          bool condition_active)
 {
     if (*i >= num_tokens)
@@ -2880,8 +3224,16 @@ static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
         }
 
         Node *last_node = NULL;
+        // If break/continue was triggered in this iteration, skip the
+        // side-effects of remaining statements in this block. We don't
+        // gate on log->exit_emitted here because assignments need to keep
+        // running so loop counters terminate — the log helpers already
+        // ignore appends once exit is emitted.
+        bool effective_active = condition_active;
+        if (lc && (lc->breaking || lc->continuing))
+            effective_active = false;
         Node *stmt = parse_statement(tokens, i, num_tokens, scope_stack,
-                                     log, &last_node, condition_active);
+                                     log, lc, &last_node, effective_active);
 
         if (stmt)
         {
@@ -2942,9 +3294,9 @@ Node *parse(Token *tokens, size_t num_tokens, OutputLog *log)
     {
         Node *last_node = NULL;
 
-        // Default condition is true
+        // Default condition is true; no enclosing loop at top level.
         Node *stmt = parse_statement(tokens, &i, num_tokens, scope_stack,
-                                     log, &last_node, true);
+                                     log, NULL, &last_node, true);
         if (!stmt)
         {
             // If statement parsing failed, clean up and exit

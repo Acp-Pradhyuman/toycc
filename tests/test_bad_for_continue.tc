@@ -1,0 +1,6 @@
+// Negative test: same malformed for header as test_bad_for_break but
+// with continue. Compiler must reject with the same header-syntax error.
+for(int i=0; i<5) {
+    continue;
+}
+exit(0);

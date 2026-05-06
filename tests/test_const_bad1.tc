@@ -1,0 +1,5 @@
+// Negative test: assignment to const should fail with a clear error.
+// Expected: exit code 1, stderr contains "assignment to const variable".
+const int X = 5;
+X = 10;
+exit(X);

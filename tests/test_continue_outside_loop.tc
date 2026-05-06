@@ -1,0 +1,5 @@
+// Negative test: 'continue' at the top level must error.
+// Expected exit code 1, stderr contains "'continue' used outside
+// of loop".
+continue;
+exit(0);

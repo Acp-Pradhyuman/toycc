@@ -35,8 +35,8 @@ do {
 } while (d > 0);
 
 // for with nested if.
-for (int f = 0; f < 5; f += 1) {
-    if (f%2 == 1) {
+for (int f = 0; f < 3; f += 1) {
+    if (f == 1) {
         printf("for-odd f=%d\n", f);
     } else {
         printf("for-even f=%d\n", f);

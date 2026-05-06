@@ -1,0 +1,19 @@
+int a = 5;
+int b = 10;
+
+int max = a > b ? a : b;       // 10
+int min = a > b ? b : a;       // 5
+int absneg = -3 < 0 ? 3 : -3; // 3
+
+// nested ternary (right-associative)
+int sign = a > 0 ? 1 : a < 0 ? -1 : 0;   // 1
+
+// ternary with string %s picker (via printf only)
+printf("max=%d min=%d absneg=%d sign=%d\n", max, min, absneg, sign);
+
+// ternary picks which int to print
+int x = 7;
+int parity = x % 2;
+printf("x=%d parity=%d is_odd=%d\n", x, parity, parity == 1 ? 1 : 0);
+
+exit(max);  // 10

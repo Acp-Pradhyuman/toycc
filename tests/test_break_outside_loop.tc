@@ -1,0 +1,5 @@
+// Negative test: 'break' at the top level (no enclosing loop) must
+// error. Expected exit code 1, stderr contains "'break' used outside
+// of loop".
+break;
+exit(0);

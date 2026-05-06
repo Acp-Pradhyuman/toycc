@@ -1,0 +1,5 @@
+// Negative test: const without an initializer should fail.
+// Expected: exit code 1, stderr contains
+// "requires an initializer".
+const int Y;
+exit(Y);

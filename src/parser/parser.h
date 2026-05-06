@@ -18,6 +18,8 @@ typedef enum
     NODE_DO_WHILE_STATEMENT,
     NODE_FOR_STATEMENT,
     NODE_PRINTF_CALL,
+    NODE_BREAK,
+    NODE_CONTINUE,
     NODE_IDENTIFIER,
     NODE_STATEMENT_END,
     NODE_UNKNOWN,
@@ -60,6 +62,7 @@ typedef struct Symbol
     int value;
     int line;
     int col;
+    int is_const;  // 1 = immutable after init; assignment is an error
 } Symbol;
 
 typedef struct SymbolTable
@@ -75,6 +78,14 @@ typedef struct ScopeStack
     size_t size;
     size_t capacity;
 } ScopeStack;
+
+// Propagated through block parsing inside loops so break/continue
+// can short-circuit the simulation.
+typedef struct
+{
+    int breaking;     // set by `break;`
+    int continuing;   // set by `continue;`
+} LoopControl;
 
 Node *parse(Token *tokens, size_t num_tokens, OutputLog *log);
 void free_ast(Node *node);

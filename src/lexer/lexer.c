@@ -423,6 +423,18 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             tokens[count++] = token;
         }
 
+        else if (ch == '?' || ch == ':')
+        {
+            Token token;
+            token.type = OPERATOR;
+            char op[2] = {ch, '\0'};
+            token.value.str_val = strdup(op);
+            token.col = col;
+            token.line = line;
+            print_token(token);
+            tokens[count++] = token;
+        }
+
         else if (ch == '/')
         {
             int start_col = col;
@@ -465,7 +477,7 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
         }
 
         // else if (strchr("+-*/%=&|^!<>", ch))
-        else if (strchr("+-*%=&|^!<>", ch))
+        else if (strchr("+-*%=&|^!<>~", ch))
         {
             int start_col = col;
             char op[4] = {ch, '\0', '\0', '\0'}; // Max 3-char operators
@@ -520,6 +532,65 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             token.col = start_col;
             token.line = line;
             print_token(token);
+            tokens[count++] = token;
+        }
+
+        else if (ch == '\'')
+        {
+            // Character literal — produces an INT token with the byte value.
+            int start_col = col;
+            int c = fgetc(file);
+            col++;
+            if (c == EOF)
+            {
+                fprintf(stderr,
+                        "ERROR: Unterminated character literal at line %d\n",
+                        line);
+                exit(EXIT_FAILURE);
+            }
+
+            int value;
+            if (c == '\\')
+            {
+                int esc = fgetc(file);
+                col++;
+                switch (esc)
+                {
+                case 'n':  value = '\n'; break;
+                case 't':  value = '\t'; break;
+                case 'r':  value = '\r'; break;
+                case '\\': value = '\\'; break;
+                case '\'': value = '\''; break;
+                case '0':  value = '\0'; break;
+                default:
+                    fprintf(stderr,
+                            "ERROR: Unknown char escape '\\%c' at line %d\n",
+                            esc, line);
+                    exit(EXIT_FAILURE);
+                }
+            }
+            else
+            {
+                value = (unsigned char)c;
+            }
+
+            int closing = fgetc(file);
+            col++;
+            if (closing != '\'')
+            {
+                fprintf(stderr,
+                        "ERROR: Expected closing \"'\" at line %d, col %d\n",
+                        line, col);
+                exit(EXIT_FAILURE);
+            }
+
+            Token token;
+            token.type = INT;
+            token.value.int_val = value;
+            token.col = start_col;
+            token.line = line;
+            printf("Found char literal value=%d at line %d and col %d\n",
+                   value, line, start_col);
             tokens[count++] = token;
         }
 
@@ -641,11 +712,15 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             Token token;
             if ((strcmp(buffer, "exit") == 0) ||
                 strcmp(buffer, "int") == 0 ||
+                strcmp(buffer, "char") == 0 ||
+                strcmp(buffer, "const") == 0 ||
                 strcmp(buffer, "if") == 0 ||
                 strcmp(buffer, "else") == 0 ||
                 strcmp(buffer, "while") == 0 ||
                 strcmp(buffer, "do") == 0 ||
                 strcmp(buffer, "for") == 0 ||
+                strcmp(buffer, "break") == 0 ||
+                strcmp(buffer, "continue") == 0 ||
                 strcmp(buffer, "printf") == 0)
             {
                 token.type = KEYWORD;

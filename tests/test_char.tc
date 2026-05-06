@@ -1,0 +1,19 @@
+// char is stored as int; character literals are ints by value.
+char letter = 'A';
+char nl = '\n';
+char tab = '\t';
+int digit = '7' - '0';   // should be 7
+
+printf("letter=%d nl=%d tab=%d digit=%d\n", letter, nl, tab, digit);
+
+// %c prints the byte.
+printf("letter as char: %c\n", letter);
+printf("spell: %c%c%c%c%c\n", 72, 101, 'l', 'l', 'o');
+
+// char in a loop — print A-E.
+for (char c = 'A'; c < 'F'; c += 1) {
+    printf("%c", c);
+}
+printf("\n");
+
+exit(digit);  // 7

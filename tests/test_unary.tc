@@ -1,0 +1,11 @@
+int a = 5;
+int b = -a;           // unary minus on var
+int c = ~0;           // bitwise NOT (should be -1)
+int d = !0;           // logical NOT of 0 (should be 1)
+int e = !a;           // logical NOT of 5 (should be 0)
+int f = -(-5);        // double negation (should be 5)
+int g = !!a;          // double logical NOT (should be 1)
+int h = -(a + 1);     // unary minus on expression (-6)
+
+printf("b=%d c=%d d=%d e=%d f=%d g=%d h=%d\n", b, c, d, e, f, g, h);
+exit(0);
