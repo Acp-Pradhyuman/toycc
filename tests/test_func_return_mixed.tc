@@ -1,0 +1,26 @@
+// Exercise all three return types in one program.
+int square(int x) {
+    return x * x;
+}
+
+char to_upper(char c) {
+    if (c >= 'a' && c <= 'z') {
+        return c - 32;
+    }
+    return c;
+}
+
+void print_labeled(int label_id, int value) {
+    printf("[%d] value=%d\n", label_id, value);
+}
+
+int s = square(6);             // 36
+char u = to_upper('q');        // 'Q'
+print_labeled(1, s);
+print_labeled(2, u);           // 81 = 'Q'
+
+// void function called inside an if.
+if (s > 10) {
+    print_labeled(3, to_upper('z'));   // 90 = 'Z'
+}
+exit(s);                       // 36

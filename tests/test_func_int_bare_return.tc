@@ -1,0 +1,6 @@
+// Negative test: non-void function with bare `return;` (no value).
+// Expected: "non-void function 'bad' must return a value".
+int bad() {
+    return;
+}
+exit(bad());

@@ -1,0 +1,17 @@
+// Mutual recursion: is_even calls is_odd which calls is_even.
+// This works because functions are registered in a pre-pass, so
+// forward references resolve.
+int is_even(int n) {
+    if (n == 0) { return 1; }
+    return is_odd(n - 1);
+}
+
+int is_odd(int n) {
+    if (n == 0) { return 0; }
+    return is_even(n - 1);
+}
+
+printf("is_even(8)=%d\n", is_even(8));   // 1
+printf("is_odd(7)=%d\n", is_odd(7));     // 1
+printf("is_even(9)=%d\n", is_even(9));   // 0
+exit(0);

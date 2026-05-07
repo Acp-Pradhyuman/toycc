@@ -1,37 +1,19 @@
 section .data
-str_0: db 48,44,32
-str_1: db 49,44,32
-str_2: db 50,44,32
-str_3: db 52,44,32
-str_4: db 10
+str_0: db 102,97,99,116,40,54,41,61,55,50,48,10
+str_1: db 102,105,98,40,49,48,41,61,53,53,10
 section .text
 global _start
 _start:
 	mov rax, 1
 	mov rdi, 1
 	lea rsi, [rel str_0]
-	mov rdx, 3
+	mov rdx, 12
 	syscall
 	mov rax, 1
 	mov rdi, 1
 	lea rsi, [rel str_1]
-	mov rdx, 3
-	syscall
-	mov rax, 1
-	mov rdi, 1
-	lea rsi, [rel str_2]
-	mov rdx, 3
-	syscall
-	mov rax, 1
-	mov rdi, 1
-	lea rsi, [rel str_3]
-	mov rdx, 3
-	syscall
-	mov rax, 1
-	mov rdi, 1
-	lea rsi, [rel str_4]
-	mov rdx, 1
+	mov rdx, 11
 	syscall
 	mov rax, 60
-	mov rdi, 0
+	mov rdi, 55
 	syscall

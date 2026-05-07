@@ -1,0 +1,15 @@
+// Basic function: no recursion, just parameters and return.
+int square(int x) {
+    return x * x;
+}
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int r1 = square(5);       // 25
+int r2 = add(3, 4);       // 7
+int r3 = square(add(2, 3)); // square(5) = 25
+
+printf("r1=%d r2=%d r3=%d\n", r1, r2, r3);
+exit(r1 + r2 + r3);       // 57

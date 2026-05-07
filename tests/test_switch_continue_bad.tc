@@ -1,0 +1,7 @@
+// Negative test: continue inside switch with no enclosing loop is
+// invalid in C. Must error with "'continue' used outside of loop".
+int x = 1;
+switch (x) {
+    case 1: continue;
+}
+exit(0);

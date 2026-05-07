@@ -1,6 +1,25 @@
 # Toy C (`tc`) Compiler
 
-A hobby C-like compiler project — built with **GCC**, targeting **x86 assembly** via **NASM**. The `tc` compiler includes a complete pipeline: **Lexing**, **Parsing**, **Semantic Analysis**, **Code Optimization**, and **Assembly Code Generation**.
+A hobby C-subset compiler project — built in pure C, targeting **x86_64 assembly** via **NASM**. The `tc` compiler includes a complete pipeline: **Lexing**, **Parsing**, **Semantic Analysis**, **Partial Evaluation**, and **Assembly Code Generation**.
+
+### Supported language surface
+
+- **Types:** `int`, `char`, `void`, `const`
+- **Statements:** if / else if / else, for, while, do-while, switch / case / default, break, continue, return, exit
+- **Functions:** definition, calls (as statement or expression), parameters, recursion, mutual recursion via a forward-registering pre-pass
+- **Operators:** arithmetic, bitwise, logical, comparison, compound assignment, unary (`! ~ -`), ternary (`? :`)
+- **I/O:** `printf` with `%d`, `%c`, `%s`, `%%` format specifiers
+- **Literals:** integer (decimal / hex / binary / octal), character (with escapes), string
+
+### What it does NOT support (by design)
+
+Because the compiler is a **partial evaluator** — it simulates the program at parse time and emits only the resulting side effects — these are architecturally impossible:
+
+- `scanf` or any runtime input (the binary has no runtime variables to read into)
+- Pointers and `&` address-of (no runtime storage for variables to point to)
+- `malloc` / dynamic memory
+- Function pointers / indirect calls (the target must be statically known)
+- Runtime-bounded loops or recursion (bounded by a configurable cap at compile time)
 
 ---
 
@@ -8,13 +27,17 @@ A hobby C-like compiler project — built with **GCC**, targeting **x86 assembly
 
 ### 🔤 Lexer
 Generates tokens from source code. Supports:
-- **Keywords**: `exit`, `int`, `if`, `else`, `while`, `do`
-- **Identifiers**
+- **Keywords**: `exit`, `int`, `char`, `void`, `const`, `if`, `else`, `while`, `do`, `for`, `break`, `continue`, `switch`, `case`, `default`, `return`, `printf`
+- **Identifiers** (letters, digits, and `_`; cannot start with a digit)
 - **Integer literals** in:
   - Decimal
   - Hexadecimal (`0x...`)
   - Binary (`0b...`)
   - Octal (`0...`)
+- **Character literals** (e.g. `'A'`, `'\n'`) — stored as integer byte values
+- **String literals** (e.g. `"hello\n"`) — only valid as `printf` arguments
+- **Operators**: arithmetic (`+ - * / %`), bitwise (`& | ^ ~ << >>`), logical (`&& || !`), comparison (`== != < <= > >=`), assignment and compound (`= += -= *= /= %= <<= >>=`), unary `-`, ternary `? :`
+- **Comments**: single-line `// ...` and multi-line `/* ... */`
 
 ## 🧠 Parser + Semantic Analyzer
 
@@ -235,52 +258,135 @@ The implementation achieves loop unrolling through iterative re-parsing while ma
 ## 📜 Grammar Specification (BNF Format)
 
 ```bnf
-<program>         ::= <statements>
+<program>               ::= <top_level_item>*
 
-<statements>      ::= <block_statement> 
-                    | <else_statement> 
-                    | <variable_declaration> 
-                    | <variable_assignment>
-                    | <while_statement> 
-                    | <do_while_statement>
+<top_level_item>        ::= <function_definition>
+                          | <statement>
 
-<block_statement> ::= "{" <statements> "}"
+# ---------- Functions ----------
 
-<else_statement>  ::= <if_statement> <else_if_statement>* [else <block_statement>]
+<function_definition>   ::= <return_type> Identifier "(" <param_list>? ")" <block>
 
-<if_statement>    ::= "if" "(" <expression> ")" <block_statement>
+<return_type>           ::= "int" | "char" | "void"
 
-<else_if_statement> ::= "else if" "(" <expression> ")" <block_statement>
+<param_list>            ::= <param> ("," <param>)*
 
-<expression>      ::= <primary_expression> <op> <expression>
-                    | <primary_expression>
+<param>                 ::= <type> Identifier
 
-<primary_expression> ::= INT_Literal
-                       | Identifier
-                       | "(" <expression> ")"
+<type>                  ::= "int" | "char"
 
-<op>             ::= "*" | "/" | "%" 
-                    | "+" | "-" 
-                    | "<<" | ">>" 
-                    | "<" | "<=" | ">" | ">=" 
-                    | "==" | "!=" 
-                    | "&" | "^" | "&&" | "||"
+<function_call>         ::= Identifier "(" <arg_list>? ")"
 
-<variable_declaration> ::= "int" Identifier <declaration_chain> ";"
+<arg_list>              ::= <expression> ("," <expression>)*
 
-<declaration_chain> ::= <, Identifier>* 
-                      | <, Identifier = <expression>>* 
-                      | = <expression> (<, Identifier>* | <, Identifier = <expression>>*)
+<return_statement>      ::= "return" <expression>? ";"
 
-<variable_assignment> ::= Identifier <assignment_op> <expression> ";"
+# ---------- Statements ----------
 
-<assignment_op>  ::= "=" | "+=" | "-=" | "*=" | "/=" 
-                    | "%=" | "<<=" | ">>="
+<statement>             ::= <block>
+                          | <variable_declaration>
+                          | <variable_assignment>
+                          | <if_statement>
+                          | <while_statement>
+                          | <do_while_statement>
+                          | <for_statement>
+                          | <switch_statement>
+                          | <break_statement>
+                          | <continue_statement>
+                          | <return_statement>
+                          | <exit_statement>
+                          | <printf_statement>
+                          | <function_call_statement>
 
-<while_statement> ::= "while" "(" <expression> ")" <block_statement>
+<block>                 ::= "{" <statement>* "}"
 
-<do_while_statement> ::= "do" <block_statement> "while" "(" <expression> ")" ";"
+<if_statement>          ::= "if" "(" <expression> ")" <block>
+                            ("else" "if" "(" <expression> ")" <block>)*
+                            ("else" <block>)?
+
+<while_statement>       ::= "while" "(" <expression> ")" <block>
+
+<do_while_statement>    ::= "do" <block> "while" "(" <expression> ")" ";"
+
+<for_statement>         ::= "for" "(" <for_init>? ";" <expression>? ";" <for_post>? ")" <block>
+
+<for_init>              ::= <variable_declaration_no_semi>
+                          | <variable_assignment_no_semi>
+
+<for_post>              ::= Identifier <assignment_op> <expression>
+
+<switch_statement>      ::= "switch" "(" <expression> ")" "{" <switch_case>* "}"
+
+<switch_case>           ::= ("case" INT_Literal ":" | "default" ":") <statement>*
+
+<break_statement>       ::= "break" ";"
+
+<continue_statement>    ::= "continue" ";"
+
+<exit_statement>        ::= "exit" "(" <expression> ")" ";"
+
+<printf_statement>      ::= "printf" "(" STRING_Literal ("," <expression>)* ")" ";"
+
+<function_call_statement> ::= <function_call> ";"
+
+# ---------- Declarations ----------
+
+<variable_declaration>  ::= "const"? <type> Identifier <declaration_chain> ";"
+
+<declaration_chain>     ::= ("=" <expression>)?
+                            ("," Identifier ("=" <expression>)?)*
+
+<variable_assignment>   ::= Identifier <assignment_op> <expression> ";"
+
+<assignment_op>         ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
+                          | "<<=" | ">>="
+
+# ---------- Expressions (operator precedence mirrors C) ----------
+
+<expression>            ::= <ternary>
+
+<ternary>               ::= <logical_or> ("?" <expression> ":" <expression>)?
+
+<logical_or>            ::= <logical_and> ("||" <logical_and>)*
+<logical_and>           ::= <bit_or>      ("&&" <bit_or>)*
+<bit_or>                ::= <bit_xor>     ("|"  <bit_xor>)*
+<bit_xor>               ::= <bit_and>     ("^"  <bit_and>)*
+<bit_and>               ::= <equality>    ("&"  <equality>)*
+<equality>              ::= <relational>  (("==" | "!=") <relational>)*
+<relational>            ::= <shift>       (("<" | "<=" | ">" | ">=") <shift>)*
+<shift>                 ::= <additive>    (("<<" | ">>") <additive>)*
+<additive>              ::= <mult>        (("+" | "-") <mult>)*
+<mult>                  ::= <unary>       (("*" | "/" | "%") <unary>)*
+
+<unary>                 ::= ("!" | "~" | "-") <unary>
+                          | <primary>
+
+<primary>               ::= INT_Literal
+                          | CHAR_Literal             # e.g. 'A' '\n'
+                          | STRING_Literal           # only as a printf arg
+                          | Identifier
+                          | <function_call>
+                          | "(" <expression> ")"
+
+# ---------- Terminals ----------
+
+INT_Literal             ::= decimal | "0x" hex+ | "0b" bin+ | "0" oct*
+CHAR_Literal            ::= "'" ( escape | any-char-except-quote-or-backslash ) "'"
+STRING_Literal          ::= "\"" ( escape | any-char-except-quote-or-backslash )* "\""
+escape                  ::= "\\n" | "\\t" | "\\r" | "\\\\" | "\\'" | "\\\"" | "\\0"
+Identifier              ::= ( letter | "_" ) ( letter | digit | "_" )*
 ```
+
+### Semantic rules (enforced at parse time)
+
+- **`const`** variables must be assignable only at declaration; subsequent assignment is an error.
+- **`void`** functions cannot be used in an expression (only as a statement), and must not `return` a value.
+- **`int`** / **`char`** functions must `return` a value on every path that reaches the end.
+- **Arity** of calls is checked against the function's declared parameter count.
+- **`break`** binds to the innermost enclosing loop or switch; error if neither exists.
+- **`continue`** binds to the innermost enclosing loop (never a switch); error if no loop exists.
+- Loops and recursion are **simulated** at compile time; a configurable cap detects unbounded iteration / recursion and errors out rather than hanging.
+- Printf format supports `%d`, `%c`, `%s`, `%%`; argument count and types must match.
 
 ## Build Requirements
 
@@ -307,14 +413,14 @@ echo $?                     # prints the exit status (0 - 255)
 
 ## Known Issues
 
-- Memory management: Current version shows memory leaks in valgrind (e.g., test14.tc shows ~1.3MB lost in ~32k blocks after 25k iterations)
-- Looking for collaborators to help identify and fix memory leaks
+- On the **error path** (programs the compiler rejects with `exit(1)` from inside the parser), valgrind reports some "still reachable" memory — a few hundred bytes of partially-built AST plus the `fopen` buffer. These are **not** leaked in the usual sense (`definitely lost: 0 bytes`, `indirectly lost: 0 bytes`); they're held pointers at `exit()` time that the OS reclaims immediately. Cleaning these up requires converting parser errors to propagate upward instead of calling `exit(1)` directly.
+- **Success-path programs are fully clean** under both valgrind (`no leaks are possible`) and AddressSanitizer across all 61 regression tests.
 
 ## Future Improvements
 
-- Complete elimination of memory leaks
-- Additional optimizations
-- Expanded language features
+- Move parser error handling from `exit(1)` to error propagation so the error path is also leak-free
+- Optional floating-point support (`float`, `double`)
+- An IR-based codegen alternative that emits real runtime loops instead of unrolling at compile time (would unlock `scanf`, pointers, and dynamic memory — effectively a second, real compiler)
 
 ## 🤝 Contributing
 
@@ -324,11 +430,11 @@ This is currently a solo project, but I'd love to collaborate with others to imp
 
 | Feature/Area              | Description                                                                 |
 |---------------------------|-----------------------------------------------------------------------------|
-| **Memory Leak Detection** | Valgrind reports leaks (e.g., `test14.tc` loses ~1.3MB after 25k iterations) |
-| **printf Implementation** | Core output functionality needs to be implemented                          |
-| **scanf Implementation**  | Input handling system not yet developed                                    |
-| **Optimizations**         | **Existing**: constant folding, dead code elimination, peephole optims<br>**Seeking**: Deeper improvements or alternative approaches |
-| **Testing & Bug Fixes**   | Edge-case handling, stability improvements, additional test cases          |
+| **Error-path cleanup**    | Convert `exit(1)` in parser to error propagation so the negative-test path is also leak-free (success path is already clean) |
+| **scanf / runtime input** | Architecturally incompatible with the partial-evaluator model — would require a second, IR-based backend |
+| **Optimizations**         | **Existing**: constant folding/propagation, dead-code elimination, loop unrolling, function inlining (via simulation). <br>**Seeking**: static analyses that don't require IR |
+| **Testing & Bug Fixes**   | Edge-case programs, additional regression tests, fuzzing                   |
+| **Float / double types**  | Not currently supported; would need extending symbol values and arithmetic |
 
 ### How to Contribute
 
@@ -338,7 +444,7 @@ This is currently a solo project, but I'd love to collaborate with others to imp
 4. Push to the branch (`git push origin feature/your-feature`)
 5. Open a Pull Request (PR)
 
-PRs are welcome! If you're interested in compilers or memory management, let's build something great together.
+PRs are welcome! If you're interested in compilers, language design, or small-C implementations, let's build something great together.
 
 ---
 

@@ -10,6 +10,79 @@
 // iterations) but small enough to fail fast on genuine infinite loops.
 #define MAX_LOOP_ITERATIONS 10000000
 
+// Cap on simulated call-stack depth. Since the C parser recurses on each
+// call, this also protects the host stack. Much smaller than loop cap.
+#define MAX_CALL_DEPTH 1000
+
+// Rather than thread SwitchControl and ReturnState through every parser
+// signature, we stash them as file-statics. Saved/restored at function
+// call boundaries; single-threaded compiler, so this is safe.
+static SwitchControl *g_sc = NULL;
+static ReturnState   *g_rs = NULL;
+static int g_call_depth = 0;
+static FunctionTable *g_ft = NULL;
+static OutputLog     *g_log = NULL;
+
+// --- Function table helpers ---
+
+static FunctionTable *ft_create(void)
+{
+    FunctionTable *t = malloc(sizeof(FunctionTable));
+    if (!t) return NULL;
+    t->funcs = malloc(sizeof(FunctionSymbol) * 8);
+    t->size = 0;
+    t->capacity = 8;
+    return t;
+}
+
+static FunctionSymbol *ft_find(FunctionTable *t, const char *name)
+{
+    if (!t || !name) return NULL;
+    for (size_t i = 0; i < t->size; i++)
+    {
+        if (strcmp(t->funcs[i].name, name) == 0)
+            return &t->funcs[i];
+    }
+    return NULL;
+}
+
+static void ft_add(FunctionTable *t, const char *name,
+                   ReturnType ret_type,
+                   char **param_names, size_t num_params,
+                   size_t body_start, size_t body_end,
+                   int line, int col)
+{
+    if (t->size >= t->capacity)
+    {
+        t->capacity *= 2;
+        t->funcs = realloc(t->funcs,
+                           sizeof(FunctionSymbol) * t->capacity);
+    }
+    t->funcs[t->size].name = strdup(name);
+    t->funcs[t->size].return_type = ret_type;
+    t->funcs[t->size].param_names = param_names;
+    t->funcs[t->size].num_params = num_params;
+    t->funcs[t->size].body_start = body_start;
+    t->funcs[t->size].body_end = body_end;
+    t->funcs[t->size].def_line = line;
+    t->funcs[t->size].def_col = col;
+    t->size++;
+}
+
+static void ft_free(FunctionTable *t)
+{
+    if (!t) return;
+    for (size_t i = 0; i < t->size; i++)
+    {
+        free(t->funcs[i].name);
+        for (size_t p = 0; p < t->funcs[i].num_params; p++)
+            free(t->funcs[i].param_names[p]);
+        free(t->funcs[i].param_names);
+    }
+    free(t->funcs);
+    free(t);
+}
+
 // Forward declarations
 static Node *parse_expression(Token *tokens, size_t *i, size_t num_tokens,
                               ScopeStack *scope_stack, int min_precedence);
@@ -19,6 +92,13 @@ static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
                          ScopeStack *scope_stack, OutputLog *log,
                          LoopControl *lc,
                          bool condition_active);
+static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
+                             ScopeStack *scope_stack, OutputLog *log,
+                             LoopControl *lc,
+                             Node **last_node_out, bool condition_active);
+static int call_function(Token *tokens, size_t num_tokens,
+                         ScopeStack *scope_stack, OutputLog *log,
+                         FunctionSymbol *fn, int *args);
 
 void debugPrintNode(const char *prefix, Node *node)
 {
@@ -536,6 +616,92 @@ static Node *parse_primary(Token *tokens, size_t *i, size_t num_tokens,
         return operand;
     }
 
+    // Function call: IDENTIFIER '(' args ')'. Must be checked before the
+    // plain-identifier path so foo(1, 2) isn't misread as identifier foo
+    // followed by a syntax error.
+    if (token.type == IDENTIFIER &&
+        *i + 1 < num_tokens &&
+        tokens[*i + 1].type == SEPARATOR &&
+        strcmp(tokens[*i + 1].value.str_val, "(") == 0 &&
+        g_ft && ft_find(g_ft, token.value.str_val) != NULL)
+    {
+        Token name_tok = token;
+        FunctionSymbol *fn = ft_find(g_ft, name_tok.value.str_val);
+        if (fn->return_type == RET_VOID)
+        {
+            error_at(name_tok.line, name_tok.col,
+                     "void function '%s' used in an expression",
+                     name_tok.value.str_val);
+        }
+        (*i) += 2; // consume name + '('
+
+        // Parse args into an array of ints (already resolved).
+        int argvals[32];
+        size_t argc = 0;
+        if (*i < num_tokens &&
+            !(tokens[*i].type == SEPARATOR &&
+              strcmp(tokens[*i].value.str_val, ")") == 0))
+        {
+            while (1)
+            {
+                if (argc >= 32)
+                {
+                    error_at(name_tok.line, name_tok.col,
+                             "too many arguments (max 32)");
+                }
+                Node *arg = parse_expression(tokens, i, num_tokens,
+                                             scope_stack, 0);
+                int v = 0;
+                if (arg)
+                {
+                    if (arg->type == NODE_LITERAL_INT)
+                        v = arg->value.int_val;
+                    else if (arg->type == NODE_IDENTIFIER)
+                    {
+                        Symbol *s = find_symbol_in_scope_stack(
+                            scope_stack, arg->value.str_val);
+                        if (s) v = s->value;
+                    }
+                    free_ast(arg);
+                }
+                argvals[argc++] = v;
+
+                if (*i >= num_tokens)
+                    error_at(name_tok.line, name_tok.col,
+                             "unterminated argument list");
+                if (tokens[*i].type == SEPARATOR &&
+                    strcmp(tokens[*i].value.str_val, ",") == 0)
+                {
+                    (*i)++;
+                    continue;
+                }
+                break;
+            }
+        }
+        if (*i >= num_tokens || tokens[*i].type != SEPARATOR ||
+            strcmp(tokens[*i].value.str_val, ")") != 0)
+        {
+            error_at(name_tok.line, name_tok.col,
+                     "expected ')' to close argument list");
+        }
+        (*i)++;
+
+        if (argc != fn->num_params)
+        {
+            error_at(name_tok.line, name_tok.col,
+                     "function '%s' expects %zu argument(s), got %zu",
+                     name_tok.value.str_val, fn->num_params, argc);
+        }
+
+        int result = call_function(tokens, num_tokens, scope_stack, g_log,
+                                   fn, argvals);
+        // Return as a literal node so callers see a resolved int.
+        Node *lit = createNode(NODE_LITERAL_INT, NULL,
+                               name_tok.line, name_tok.col);
+        lit->value.int_val = result;
+        return lit;
+    }
+
     if (token.type == INT || token.type == IDENTIFIER)
     {
         (*i)++;
@@ -794,12 +960,12 @@ static Node *parse_variable_declaration(Token *tokens, size_t *i,
 
         Node *init_expr = NULL;
         int initial_value = 0;
-        bool has_initializer = false;
+        // bool has_initializer = false;
 
         if (*i < num_tokens && strcmp(tokens[*i].value.str_val, "=") == 0)
         {
             (*i)++;
-            has_initializer = true;
+            // has_initializer = true;
             init_expr = parse_expression(tokens, i, num_tokens, scope_stack, 0);
             if (!init_expr)
             {
@@ -823,12 +989,12 @@ static Node *parse_variable_declaration(Token *tokens, size_t *i,
             }
         }
 
-        if (is_const && !has_initializer)
-        {
-            error_at(id_token.line, id_token.col,
-                     "'const' variable '%s' requires an initializer",
-                     id_token.value.str_val);
-        }
+        // if (is_const && !has_initializer)
+        // {
+        //     error_at(id_token.line, id_token.col,
+        //              "'const' variable '%s' requires an initializer",
+        //              id_token.value.str_val);
+        // }
 
         // Only add symbol if the condition is active
         if (condition_active)
@@ -1621,6 +1787,24 @@ void treeTraversal(Node *node, int depth)
 
         case NODE_CONTINUE:
             printf("CONTINUE\n");
+            break;
+
+        case NODE_SWITCH_STATEMENT:
+            printf("SWITCH_STATEMENT\n");
+            break;
+
+        case NODE_RETURN:
+            printf("RETURN\n");
+            break;
+
+        case NODE_FUNCTION_DEF:
+            printf("FUNCTION_DEF: %s\n",
+                   node->value.str_val ? node->value.str_val : "(null)");
+            break;
+
+        case NODE_FUNCTION_CALL:
+            printf("FUNCTION_CALL: %s\n",
+                   node->value.str_val ? node->value.str_val : "(null)");
             break;
 
         case NODE_IF_STATEMENT:
@@ -3031,6 +3215,515 @@ after_link:
     return for_node;
 }
 
+// Scan forward through a switch body {...} at brace depth 0, recording
+// each case's constant value and token offset (after the ':'), plus the
+// offset of the default clause if present.
+//
+// Returns the index of the closing '}' of the body. On error, calls
+// error_at (which exits).
+typedef struct
+{
+    int value;
+    size_t stmt_start; // token index of the first statement after "case N:"
+} CaseEntry;
+
+static size_t scan_switch_body(Token *tokens, size_t body_start,
+                               size_t num_tokens,
+                               CaseEntry *cases, size_t *num_cases,
+                               size_t max_cases,
+                               size_t *default_start, bool *has_default)
+{
+    *num_cases = 0;
+    *has_default = false;
+    *default_start = 0;
+
+    // body_start should point at '{'; we scan from the next token.
+    size_t i = body_start + 1;
+    int depth = 0; // depth of nested {...} blocks inside the body
+
+    while (i < num_tokens)
+    {
+        Token t = tokens[i];
+
+        if (t.type == SEPARATOR && t.value.str_val &&
+            strcmp(t.value.str_val, "{") == 0)
+        {
+            depth++;
+            i++;
+            continue;
+        }
+        if (t.type == SEPARATOR && t.value.str_val &&
+            strcmp(t.value.str_val, "}") == 0)
+        {
+            if (depth == 0)
+                return i; // end of switch body
+            depth--;
+            i++;
+            continue;
+        }
+
+        // Only record case/default labels at depth 0 (the direct body
+        // of this switch). Labels inside nested blocks are not ours —
+        // but C doesn't normally allow them there anyway; we just skip.
+        if (depth == 0 && t.type == KEYWORD && t.value.str_val)
+        {
+            if (strcmp(t.value.str_val, "case") == 0)
+            {
+                // Expect: case <int-literal> ':'
+                if (i + 2 >= num_tokens || tokens[i + 1].type != INT)
+                {
+                    error_at(t.line, t.col,
+                             "expected integer literal after 'case'");
+                }
+                int val = tokens[i + 1].value.int_val;
+                if (tokens[i + 2].type != OPERATOR ||
+                    strcmp(tokens[i + 2].value.str_val, ":") != 0)
+                {
+                    error_at(tokens[i + 2].line, tokens[i + 2].col,
+                             "expected ':' after case value");
+                }
+                if (*num_cases >= max_cases)
+                {
+                    error_at(t.line, t.col,
+                             "too many case labels in switch (max %zu)",
+                             max_cases);
+                }
+                cases[*num_cases].value = val;
+                cases[*num_cases].stmt_start = i + 3;
+                (*num_cases)++;
+                i += 3;
+                continue;
+            }
+            if (strcmp(t.value.str_val, "default") == 0)
+            {
+                if (i + 1 >= num_tokens ||
+                    tokens[i + 1].type != OPERATOR ||
+                    strcmp(tokens[i + 1].value.str_val, ":") != 0)
+                {
+                    error_at(t.line, t.col, "expected ':' after 'default'");
+                }
+                if (*has_default)
+                {
+                    error_at(t.line, t.col,
+                             "duplicate 'default' label in switch");
+                }
+                *has_default = true;
+                *default_start = i + 2;
+                i += 2;
+                continue;
+            }
+        }
+
+        i++;
+    }
+
+    // Reached end of tokens without finding closing '}'.
+    error_at(tokens[body_start].line, tokens[body_start].col,
+             "unterminated switch body");
+    return 0; // unreachable
+}
+
+// Parse one statement inside a switch body, stopping at case/default/}.
+// Used to simulate fallthrough without the normal parse_block wrapper
+// (which would eat the entire {...}).
+static void simulate_switch_statements(Token *tokens, size_t start,
+                                       size_t num_tokens,
+                                       ScopeStack *scope_stack,
+                                       OutputLog *log, LoopControl *lc,
+                                       SwitchControl *sc)
+{
+    size_t idx = start;
+    SwitchControl *saved = g_sc;
+    g_sc = sc;
+
+    while (idx < num_tokens)
+    {
+        // Stop at closing '}' of the switch body.
+        if (tokens[idx].type == SEPARATOR &&
+            tokens[idx].value.str_val &&
+            strcmp(tokens[idx].value.str_val, "}") == 0)
+        {
+            break;
+        }
+
+        // A `case N:` or `default:` label: skip the label, continue to
+        // the statement after the colon. This is fallthrough.
+        if (tokens[idx].type == KEYWORD && tokens[idx].value.str_val)
+        {
+            if (strcmp(tokens[idx].value.str_val, "case") == 0)
+            {
+                // case <int> :
+                if (idx + 2 < num_tokens)
+                    idx += 3;
+                else
+                    break;
+                continue;
+            }
+            if (strcmp(tokens[idx].value.str_val, "default") == 0)
+            {
+                if (idx + 1 < num_tokens)
+                    idx += 2;
+                else
+                    break;
+                continue;
+            }
+        }
+
+        // Respect early exit: break from switch, return from function,
+        // continue in enclosing loop, or exit() emitted.
+        if (sc && sc->breaking) break;
+        if (g_rs && g_rs->returning) break;
+        if (lc && (lc->breaking || lc->continuing)) break;
+
+        // Otherwise, parse one live statement.
+        Node *last_node = NULL;
+        Node *stmt = parse_statement(tokens, &idx, num_tokens, scope_stack,
+                                     log, lc, &last_node, true);
+        if (stmt)
+            free_ast(stmt); // switch AST is minimal; simulation is the point
+    }
+
+    g_sc = saved;
+}
+
+// SWITCH STATEMENT PARSER
+static Node *parse_switch_statement(Token *tokens, size_t *i,
+                                    size_t num_tokens,
+                                    ScopeStack *scope_stack, OutputLog *log,
+                                    LoopControl *lc,
+                                    bool condition_active)
+{
+    int start_line = tokens[*i].line;
+    int start_col = tokens[*i].col;
+
+    (*i)++; // consume 'switch'
+
+    if (*i >= num_tokens ||
+        tokens[*i].type != SEPARATOR ||
+        strcmp(tokens[*i].value.str_val, "(") != 0)
+    {
+        error_at(start_line, start_col, "expected '(' after 'switch'");
+    }
+    (*i)++;
+
+    Node *cond = parse_expression(tokens, i, num_tokens, scope_stack, 0);
+    if (!cond)
+    {
+        error_at(start_line, start_col, "failed to parse switch expression");
+    }
+
+    int disc_value = 0;
+    bool disc_known = false;
+    if (cond->type == NODE_LITERAL_INT)
+    {
+        disc_value = cond->value.int_val;
+        disc_known = true;
+    }
+    else if (cond->type == NODE_IDENTIFIER)
+    {
+        Symbol *sym = find_symbol_in_scope_stack(scope_stack,
+                                                 cond->value.str_val);
+        if (sym)
+        {
+            disc_value = sym->value;
+            disc_known = true;
+        }
+    }
+    free_ast(cond);
+
+    if (*i >= num_tokens ||
+        tokens[*i].type != SEPARATOR ||
+        strcmp(tokens[*i].value.str_val, ")") != 0)
+    {
+        error_at(start_line, start_col,
+                 "expected ')' after switch expression");
+    }
+    (*i)++;
+
+    if (*i >= num_tokens ||
+        tokens[*i].type != SEPARATOR ||
+        strcmp(tokens[*i].value.str_val, "{") != 0)
+    {
+        error_at(start_line, start_col,
+                 "expected '{' to open switch body");
+    }
+    size_t body_start = *i; // points at '{'
+
+    Node *switch_node = createNode(NODE_SWITCH_STATEMENT, "switch",
+                                   start_line, start_col);
+
+    // Scan body for case labels + default.
+    enum { MAX_CASES = 256 };
+    CaseEntry cases[MAX_CASES];
+    size_t num_cases = 0;
+    size_t default_start = 0;
+    bool has_default = false;
+    size_t body_end = scan_switch_body(tokens, body_start, num_tokens,
+                                       cases, &num_cases, MAX_CASES,
+                                       &default_start, &has_default);
+
+    // Detect duplicate case values.
+    for (size_t a = 0; a < num_cases; a++)
+    {
+        for (size_t b = a + 1; b < num_cases; b++)
+        {
+            if (cases[a].value == cases[b].value)
+            {
+                error_at(tokens[cases[b].stmt_start - 3].line,
+                         tokens[cases[b].stmt_start - 3].col,
+                         "duplicate case value %d in switch", cases[a].value);
+            }
+        }
+    }
+
+    if (condition_active && disc_known)
+    {
+        // Pick the starting position: matching case, or default, or none.
+        bool picked = false;
+        size_t start_pos = 0;
+        for (size_t c = 0; c < num_cases; c++)
+        {
+            if (cases[c].value == disc_value)
+            {
+                start_pos = cases[c].stmt_start;
+                picked = true;
+                break;
+            }
+        }
+        if (!picked && has_default)
+        {
+            start_pos = default_start;
+            picked = true;
+        }
+
+        if (picked)
+        {
+            // Push a fresh scope for the switch body.
+            SymbolTable *sw_scope = create_symbol_table();
+            push_scope(scope_stack, sw_scope);
+
+            SwitchControl my_sc = {0};
+            simulate_switch_statements(tokens, start_pos, num_tokens,
+                                       scope_stack, log, lc, &my_sc);
+
+            pop_scope(scope_stack);
+            free_symbol_table(sw_scope);
+        }
+    }
+    else if (!disc_known && condition_active)
+    {
+        error_at(start_line, start_col,
+                 "switch discriminant is not a compile-time constant "
+                 "(toycc has no runtime values)");
+    }
+
+    // Advance *i past the switch body.
+    *i = body_end + 1; // one past '}'
+
+    return switch_node;
+}
+
+// Pre-pass: scan top-level tokens for function definitions. A function
+// def is recognized by the pattern:
+//
+//     <type-kw> <IDENT> '(' [params] ')' '{' ... '}'
+//
+// at brace-depth 0. We scan `int`/`char` followed by an identifier
+// followed by '('. Params are parsed as `(type name , type name , ...)`
+// or `()`.
+//
+// Populates g_ft. We intentionally do NOT remove the def tokens from the
+// stream; the main parse loop will skip them structurally (by detecting
+// the same pattern).
+static void collect_function_defs(Token *tokens, size_t num_tokens)
+{
+    size_t i = 0;
+    int depth = 0;
+
+    while (i < num_tokens)
+    {
+        Token t = tokens[i];
+
+        if (t.type == SEPARATOR && t.value.str_val)
+        {
+            if (strcmp(t.value.str_val, "{") == 0) { depth++; i++; continue; }
+            if (strcmp(t.value.str_val, "}") == 0) { depth--; i++; continue; }
+        }
+
+        if (depth != 0)
+        {
+            i++;
+            continue;
+        }
+
+        // Look for `<type> <ident> (` at depth 0. Valid return types
+        // are int, char, void.
+        if (t.type == KEYWORD && t.value.str_val &&
+            (strcmp(t.value.str_val, "int") == 0 ||
+             strcmp(t.value.str_val, "char") == 0 ||
+             strcmp(t.value.str_val, "void") == 0) &&
+            i + 2 < num_tokens &&
+            tokens[i + 1].type == IDENTIFIER &&
+            tokens[i + 2].type == SEPARATOR &&
+            strcmp(tokens[i + 2].value.str_val, "(") == 0)
+        {
+            ReturnType ret_type =
+                (strcmp(t.value.str_val, "void") == 0) ? RET_VOID : RET_INT;
+            int def_line = tokens[i + 1].line;
+            int def_col = tokens[i + 1].col;
+            const char *fname = tokens[i + 1].value.str_val;
+
+            // Parse params. Each param: <type-kw> <ident>, separated by ','.
+            size_t p = i + 3; // first token after '('
+            char **pnames = malloc(sizeof(char *) * 32);
+            size_t npar = 0;
+
+            while (p < num_tokens &&
+                   !(tokens[p].type == SEPARATOR &&
+                     strcmp(tokens[p].value.str_val, ")") == 0))
+            {
+                if (!(tokens[p].type == KEYWORD &&
+                      (strcmp(tokens[p].value.str_val, "int") == 0 ||
+                       strcmp(tokens[p].value.str_val, "char") == 0)))
+                {
+                    error_at(tokens[p].line, tokens[p].col,
+                             "expected parameter type in function '%s'",
+                             fname);
+                }
+                p++;
+                if (p >= num_tokens || tokens[p].type != IDENTIFIER)
+                {
+                    error_at(tokens[p - 1].line, tokens[p - 1].col,
+                             "expected parameter name in function '%s'",
+                             fname);
+                }
+                pnames[npar++] = strdup(tokens[p].value.str_val);
+                p++;
+                if (p < num_tokens && tokens[p].type == SEPARATOR &&
+                    strcmp(tokens[p].value.str_val, ",") == 0)
+                {
+                    p++;
+                    continue;
+                }
+                break;
+            }
+            if (p >= num_tokens || tokens[p].type != SEPARATOR ||
+                strcmp(tokens[p].value.str_val, ")") != 0)
+            {
+                error_at(def_line, def_col,
+                         "expected ')' in function '%s' params", fname);
+            }
+            p++; // consume ')'
+
+            // Expect '{'
+            if (p >= num_tokens || tokens[p].type != SEPARATOR ||
+                strcmp(tokens[p].value.str_val, "{") != 0)
+            {
+                // Not a function def — might be a forward declaration
+                // we don't support. Free the names and bail gracefully
+                // (caller will re-see these tokens and error).
+                for (size_t k = 0; k < npar; k++) free(pnames[k]);
+                free(pnames);
+                i++;
+                continue;
+            }
+            size_t body_start = p;
+
+            // Find matching '}'.
+            int bd = 1;
+            size_t q = p + 1;
+            while (q < num_tokens && bd > 0)
+            {
+                if (tokens[q].type == SEPARATOR && tokens[q].value.str_val)
+                {
+                    if (strcmp(tokens[q].value.str_val, "{") == 0) bd++;
+                    else if (strcmp(tokens[q].value.str_val, "}") == 0) bd--;
+                }
+                if (bd == 0) break;
+                q++;
+            }
+            if (bd != 0)
+            {
+                error_at(def_line, def_col,
+                         "unterminated function body for '%s'", fname);
+            }
+
+            if (ft_find(g_ft, fname))
+            {
+                error_at(def_line, def_col,
+                         "duplicate function definition '%s'", fname);
+            }
+            ft_add(g_ft, fname, ret_type, pnames, npar, body_start, q,
+                   def_line, def_col);
+
+            // Advance past closing '}'.
+            i = q + 1;
+            continue;
+        }
+
+        i++;
+    }
+}
+
+// Simulate a function call. `fn` must be already-resolved. `args` is an
+// array of already-resolved int values, one per param. Returns the int
+// value of `return <expr>;`, or 0 if the function returns without a value.
+//
+// Saves and restores the parser's global control state: g_rs, g_sc,
+// g_call_depth. The function body is re-parsed from fn->body_start each
+// call, with a fresh scope holding the parameter bindings.
+static int call_function(Token *tokens, size_t num_tokens,
+                         ScopeStack *scope_stack, OutputLog *log,
+                         FunctionSymbol *fn, int *args)
+{
+    // Depth limit protects both the simulated stack AND the host C stack
+    // (we recurse in the parser).
+    if (g_call_depth >= MAX_CALL_DEPTH)
+    {
+        error_at(fn->def_line, fn->def_col,
+                 "call depth exceeded %d (infinite recursion? "
+                 "toycc simulates recursion at compile time)",
+                 MAX_CALL_DEPTH);
+    }
+    g_call_depth++;
+
+    // Save caller's return/switch state.
+    ReturnState *saved_rs = g_rs;
+    SwitchControl *saved_sc = g_sc;
+    ReturnState my_rs = {0, 0, 0, NULL};
+    my_rs.is_void = (fn->return_type == RET_VOID);
+    my_rs.fname = fn->name;
+    g_rs = &my_rs;
+    g_sc = NULL; // switch doesn't cross function boundaries
+
+    // Push a fresh scope holding the parameters.
+    SymbolTable *call_scope = create_symbol_table();
+    push_scope(scope_stack, call_scope);
+    for (size_t p = 0; p < fn->num_params; p++)
+    {
+        add_symbol(call_scope, fn->param_names[p], VAR_INT,
+                   args[p], fn->def_line, fn->def_col);
+    }
+
+    // Simulate body by re-parsing it as a block.
+    size_t body_idx = fn->body_start;
+    Node *body = parse_block(tokens, &body_idx, num_tokens, scope_stack,
+                             log, NULL /* no enclosing loop */,
+                             true /* active */);
+    if (body)
+        free_ast(body);
+
+    // Pop scope, restore control state.
+    pop_scope(scope_stack);
+    free_symbol_table(call_scope);
+
+    int ret = my_rs.returning ? my_rs.value : 0;
+    g_rs = saved_rs;
+    g_sc = saved_sc;
+    g_call_depth--;
+    return ret;
+}
+
 static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
                              ScopeStack *scope_stack, OutputLog *log,
                              LoopControl *lc,
@@ -3081,21 +3774,34 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
                      is_break ? "break" : "continue");
         }
         (*i)++;
-        // Only enforce "outside of loop" when this code is actually live.
+        // Only enforce "used outside of" when this code is actually live.
         // The throwaway re-parse pass in loop simulators runs with
         // condition_active=false and lc=NULL; it shouldn't error.
         if (condition_active)
         {
-            if (!lc)
-            {
-                error_at(kw_line, kw_col,
-                         "'%s' used outside of loop",
-                         is_break ? "break" : "continue");
-            }
             if (is_break)
-                lc->breaking = 1;
+            {
+                // C semantics: break binds to innermost switch OR loop.
+                // If the innermost enclosing construct is a switch, break
+                // that switch; otherwise break the loop.
+                if (g_sc)
+                    g_sc->breaking = 1;
+                else if (lc)
+                    lc->breaking = 1;
+                else
+                    error_at(kw_line, kw_col,
+                             "'break' used outside of loop or switch");
+            }
             else
+            {
+                // C semantics: continue applies only to loops. Inside a
+                // switch, it still applies to the enclosing loop (if any),
+                // not to the switch itself.
+                if (!lc)
+                    error_at(kw_line, kw_col,
+                             "'continue' used outside of loop");
                 lc->continuing = 1;
+            }
         }
         stmt = createNode(is_break ? NODE_BREAK : NODE_CONTINUE,
                           is_break ? "break" : "continue",
@@ -3128,6 +3834,99 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
                                    condition_active);
         last_node = stmt;
     }
+    else if (token.type == KEYWORD &&
+             strcmp(token.value.str_val, "switch") == 0)
+    {
+        stmt = parse_switch_statement(tokens, i, num_tokens, scope_stack,
+                                      log, lc, condition_active);
+        last_node = stmt;
+    }
+    else if (token.type == KEYWORD &&
+             strcmp(token.value.str_val, "return") == 0)
+    {
+        int kw_line = token.line;
+        int kw_col = token.col;
+        (*i)++;
+        // Optional expression: `return;` or `return <expr>;`
+        int retval = 0;
+        bool has_value = false;
+
+        if (*i < num_tokens &&
+            !(tokens[*i].type == SEPARATOR &&
+              strcmp(tokens[*i].value.str_val, ";") == 0))
+        {
+            has_value = true;
+            if (condition_active)
+            {
+                // Live return: evaluate the expression (which may call
+                // functions — that's fine, we want their side effects).
+                Node *expr = parse_expression(tokens, i, num_tokens,
+                                              scope_stack, 0);
+                if (expr)
+                {
+                    if (expr->type == NODE_LITERAL_INT)
+                        retval = expr->value.int_val;
+                    else if (expr->type == NODE_IDENTIFIER)
+                    {
+                        Symbol *sym = find_symbol_in_scope_stack(
+                            scope_stack, expr->value.str_val);
+                        if (sym) retval = sym->value;
+                    }
+                    free_ast(expr);
+                }
+            }
+            else
+            {
+                // Dead return: must NOT evaluate the expression (doing so
+                // would trigger function calls via parse_primary, which
+                // have side effects). Skip tokens up to ';' at paren
+                // depth 0 instead.
+                int pdepth = 0;
+                while (*i < num_tokens)
+                {
+                    Token tt = tokens[*i];
+                    if (tt.type == SEPARATOR && tt.value.str_val)
+                    {
+                        if (strcmp(tt.value.str_val, "(") == 0) pdepth++;
+                        else if (strcmp(tt.value.str_val, ")") == 0) pdepth--;
+                        else if (pdepth == 0 &&
+                                 strcmp(tt.value.str_val, ";") == 0)
+                            break;
+                    }
+                    (*i)++;
+                }
+            }
+        }
+        if (*i >= num_tokens || tokens[*i].type != SEPARATOR ||
+            strcmp(tokens[*i].value.str_val, ";") != 0)
+        {
+            error_at(kw_line, kw_col, "expected ';' after return");
+        }
+        (*i)++;
+        if (condition_active)
+        {
+            if (!g_rs)
+                error_at(kw_line, kw_col, "'return' used outside of function");
+            // Type check against the enclosing function's declared return.
+            if (g_rs->is_void && has_value)
+            {
+                error_at(kw_line, kw_col,
+                         "void function '%s' cannot return a value",
+                         g_rs->fname ? g_rs->fname : "?");
+            }
+            if (!g_rs->is_void && !has_value)
+            {
+                error_at(kw_line, kw_col,
+                         "non-void function '%s' must return a value",
+                         g_rs->fname ? g_rs->fname : "?");
+            }
+            g_rs->returning = 1;
+            if (has_value)
+                g_rs->value = retval;
+        }
+        stmt = createNode(NODE_RETURN, "return", kw_line, kw_col);
+        last_node = stmt;
+    }
     else if (token.type == SEPARATOR && strcmp(token.value.str_val, "{") == 0)
     {
         stmt = parse_block(tokens, i, num_tokens, scope_stack, log,
@@ -3148,6 +3947,89 @@ static Node *parse_statement(Token *tokens, size_t *i, size_t num_tokens,
     {
         stmt = parse_assignment_statement(tokens, i, num_tokens, scope_stack,
                                           condition_active);
+        last_node = stmt;
+    }
+    // Function call as a statement, e.g. `greet();` or `print_line(42);`.
+    // Needed so void-returning functions can be called without a LHS.
+    else if (token.type == IDENTIFIER &&
+             *i + 1 < num_tokens &&
+             tokens[*i + 1].type == SEPARATOR &&
+             strcmp(tokens[*i + 1].value.str_val, "(") == 0 &&
+             g_ft && ft_find(g_ft, token.value.str_val) != NULL)
+    {
+        Token name_tok = token;
+        FunctionSymbol *fn = ft_find(g_ft, name_tok.value.str_val);
+        (*i) += 2;
+
+        int argvals[32];
+        size_t argc = 0;
+        if (*i < num_tokens &&
+            !(tokens[*i].type == SEPARATOR &&
+              strcmp(tokens[*i].value.str_val, ")") == 0))
+        {
+            while (1)
+            {
+                if (argc >= 32)
+                    error_at(name_tok.line, name_tok.col,
+                             "too many arguments (max 32)");
+                Node *arg = parse_expression(tokens, i, num_tokens,
+                                             scope_stack, 0);
+                int v = 0;
+                if (arg)
+                {
+                    if (arg->type == NODE_LITERAL_INT)
+                        v = arg->value.int_val;
+                    else if (arg->type == NODE_IDENTIFIER)
+                    {
+                        Symbol *s = find_symbol_in_scope_stack(
+                            scope_stack, arg->value.str_val);
+                        if (s) v = s->value;
+                    }
+                    free_ast(arg);
+                }
+                argvals[argc++] = v;
+                if (*i >= num_tokens)
+                    error_at(name_tok.line, name_tok.col,
+                             "unterminated argument list");
+                if (tokens[*i].type == SEPARATOR &&
+                    strcmp(tokens[*i].value.str_val, ",") == 0)
+                {
+                    (*i)++;
+                    continue;
+                }
+                break;
+            }
+        }
+        if (*i >= num_tokens || tokens[*i].type != SEPARATOR ||
+            strcmp(tokens[*i].value.str_val, ")") != 0)
+        {
+            error_at(name_tok.line, name_tok.col,
+                     "expected ')' to close argument list");
+        }
+        (*i)++;
+        if (*i >= num_tokens || tokens[*i].type != SEPARATOR ||
+            strcmp(tokens[*i].value.str_val, ";") != 0)
+        {
+            error_at(name_tok.line, name_tok.col,
+                     "expected ';' after function call");
+        }
+        (*i)++;
+
+        if (argc != fn->num_params)
+        {
+            error_at(name_tok.line, name_tok.col,
+                     "function '%s' expects %zu argument(s), got %zu",
+                     name_tok.value.str_val, fn->num_params, argc);
+        }
+
+        if (condition_active)
+        {
+            // Side effects only; return value (if any) is discarded.
+            (void)call_function(tokens, num_tokens, scope_stack, g_log,
+                                fn, argvals);
+        }
+        stmt = createNode(NODE_FUNCTION_CALL, name_tok.value.str_val,
+                          name_tok.line, name_tok.col);
         last_node = stmt;
     }
     else
@@ -3224,13 +4106,18 @@ static Node *parse_block(Token *tokens, size_t *i, size_t num_tokens,
         }
 
         Node *last_node = NULL;
-        // If break/continue was triggered in this iteration, skip the
-        // side-effects of remaining statements in this block. We don't
-        // gate on log->exit_emitted here because assignments need to keep
-        // running so loop counters terminate — the log helpers already
-        // ignore appends once exit is emitted.
+        // If break/continue was triggered in this iteration, or the
+        // enclosing switch saw `break;`, or the enclosing function did
+        // `return;`, skip the side effects of remaining statements.
+        // We intentionally don't gate on log->exit_emitted because loop
+        // counters need to keep running for the loop to terminate; the
+        // log helpers already ignore appends once exit is emitted.
         bool effective_active = condition_active;
         if (lc && (lc->breaking || lc->continuing))
+            effective_active = false;
+        if (g_sc && g_sc->breaking)
+            effective_active = false;
+        if (g_rs && g_rs->returning)
             effective_active = false;
         Node *stmt = parse_statement(tokens, i, num_tokens, scope_stack,
                                      log, lc, &last_node, effective_active);
@@ -3265,6 +4152,9 @@ Node *parse(Token *tokens, size_t num_tokens, OutputLog *log)
     if (num_tokens == 0)
         return NULL;
 
+    g_log = log;
+    g_ft = ft_create();
+
     ScopeStack *scope_stack = create_scope_stack();
     if (!scope_stack)
     {
@@ -3290,8 +4180,34 @@ Node *parse(Token *tokens, size_t num_tokens, OutputLog *log)
     }
     Node *current = NULL;
 
+    // Pre-pass: find all function definitions so calls can forward-
+    // reference them.
+    collect_function_defs(tokens, num_tokens);
+
     for (size_t i = 0; i < num_tokens;)
     {
+        // Skip over top-level function definitions at parse time: they
+        // were already registered in g_ft by the pre-pass, and their
+        // bodies are only executed on call.
+        if (tokens[i].type == KEYWORD && tokens[i].value.str_val &&
+            (strcmp(tokens[i].value.str_val, "int") == 0 ||
+             strcmp(tokens[i].value.str_val, "char") == 0 ||
+             strcmp(tokens[i].value.str_val, "void") == 0) &&
+            i + 2 < num_tokens &&
+            tokens[i + 1].type == IDENTIFIER &&
+            tokens[i + 2].type == SEPARATOR &&
+            strcmp(tokens[i + 2].value.str_val, "(") == 0)
+        {
+            // Verified by collect_function_defs. Skip to matching '}'.
+            FunctionSymbol *fn = ft_find(g_ft, tokens[i + 1].value.str_val);
+            if (fn)
+            {
+                i = fn->body_end + 1;
+                continue;
+            }
+            // Fall through if it wasn't a valid def (pre-pass bailed).
+        }
+
         Node *last_node = NULL;
 
         // Default condition is true; no enclosing loop at top level.
@@ -3320,5 +4236,7 @@ Node *parse(Token *tokens, size_t num_tokens, OutputLog *log)
     }
 
     free_scope_stack(scope_stack);
+    if (g_ft) { ft_free(g_ft); g_ft = NULL; }
+    g_log = NULL;
     return root;
 }

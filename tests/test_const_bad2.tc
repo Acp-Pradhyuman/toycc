@@ -2,4 +2,5 @@
 // Expected: exit code 1, stderr contains
 // "requires an initializer".
 const int Y;
+printf("Y = %d\n", Y);
 exit(Y);

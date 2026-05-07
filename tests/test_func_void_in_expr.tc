@@ -1,0 +1,8 @@
+// Negative test: a void-returning function cannot be used as an
+// expression. Expected: "void function 'say_hi' used in an expression".
+void say_hi() {
+    printf("hi\n");
+}
+
+int x = say_hi();
+exit(x);

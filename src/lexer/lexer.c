@@ -246,7 +246,7 @@ int read_identifier(char first_char, FILE *file, int *col, char *buffer,
 
     buffer[length++] = first_char;
 
-    while ((ch = fgetc(file)) != EOF && isalnum(ch))
+    while ((ch = fgetc(file)) != EOF && (isalnum(ch) || ch == '_'))
     {
         if (length < (int)(buf_size - 1))
         {
@@ -702,7 +702,7 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             tokens[count++] = token;
         }
 
-        else if (isalpha(ch))
+        else if (isalpha(ch) || ch == '_')
         {
             char buffer[32];
             int start_col = col;
@@ -713,6 +713,7 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
             if ((strcmp(buffer, "exit") == 0) ||
                 strcmp(buffer, "int") == 0 ||
                 strcmp(buffer, "char") == 0 ||
+                strcmp(buffer, "void") == 0 ||
                 strcmp(buffer, "const") == 0 ||
                 strcmp(buffer, "if") == 0 ||
                 strcmp(buffer, "else") == 0 ||
@@ -721,6 +722,10 @@ Token *lexer(FILE *file, size_t *num_tokens_out)
                 strcmp(buffer, "for") == 0 ||
                 strcmp(buffer, "break") == 0 ||
                 strcmp(buffer, "continue") == 0 ||
+                strcmp(buffer, "switch") == 0 ||
+                strcmp(buffer, "case") == 0 ||
+                strcmp(buffer, "default") == 0 ||
+                strcmp(buffer, "return") == 0 ||
                 strcmp(buffer, "printf") == 0)
             {
                 token.type = KEYWORD;

@@ -20,6 +20,12 @@ typedef enum
     NODE_PRINTF_CALL,
     NODE_BREAK,
     NODE_CONTINUE,
+    NODE_SWITCH_STATEMENT,
+    NODE_CASE,
+    NODE_DEFAULT,
+    NODE_RETURN,
+    NODE_FUNCTION_DEF,
+    NODE_FUNCTION_CALL,
     NODE_IDENTIFIER,
     NODE_STATEMENT_END,
     NODE_UNKNOWN,
@@ -86,6 +92,61 @@ typedef struct
     int breaking;     // set by `break;`
     int continuing;   // set by `continue;`
 } LoopControl;
+
+// Propagated through block parsing inside a switch. `break` binds to the
+// innermost switch (not the enclosing loop). `continue` inside a switch
+// still binds to the outer LoopControl (standard C semantics).
+typedef struct
+{
+    int breaking;
+} SwitchControl;
+
+// Set on a call frame when `return;` is executed. Simulator short-circuits
+// all remaining work inside the function body.
+typedef struct
+{
+    int returning;
+    int value;
+    int is_void;       // 1 if the enclosing function is declared void
+    const char *fname; // for better error messages
+} ReturnState;
+
+// Aggregated control-flow state handed to block/statement parsers so we
+// can add new control constructs without changing every signature.
+// Any field may be NULL to signal "no enclosing construct of that kind".
+typedef struct
+{
+    LoopControl *lc;      // innermost enclosing loop, or NULL
+    SwitchControl *sc;    // innermost enclosing switch, or NULL
+    ReturnState *rs;      // current function's return slot, or NULL
+} FlowCtx;
+
+typedef enum
+{
+    RET_INT,    // int or char (both stored as int in toycc)
+    RET_VOID,
+} ReturnType;
+
+// Function symbol table. Stores name, parameter names, and token range
+// of the body so call sites can re-parse it with fresh scopes.
+typedef struct
+{
+    char *name;
+    ReturnType return_type;
+    char **param_names;
+    size_t num_params;
+    size_t body_start;   // token index of the '{' that opens the body
+    size_t body_end;     // token index of the matching '}'
+    int def_line;
+    int def_col;
+} FunctionSymbol;
+
+typedef struct
+{
+    FunctionSymbol *funcs;
+    size_t size;
+    size_t capacity;
+} FunctionTable;
 
 Node *parse(Token *tokens, size_t num_tokens, OutputLog *log);
 void free_ast(Node *node);

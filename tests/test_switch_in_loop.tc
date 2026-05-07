@@ -1,0 +1,12 @@
+// break inside switch breaks ONLY the switch — the enclosing loop
+// must keep iterating. For each i we print "i=<n>: <word>\n".
+for (int i = 0; i < 3; i += 1) {
+    printf("i=%d: ", i);
+    switch (i) {
+        case 0: printf("zero"); break;
+        case 1: printf("one"); break;
+        default: printf("other"); break;
+    }
+    printf("\n");
+}
+exit(0);

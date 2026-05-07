@@ -1,0 +1,7 @@
+// Negative test: calling a function with wrong number of arguments.
+// Expected: "function 'add' expects 2 argument(s), got 1".
+int add(int a, int b) {
+    return a + b;
+}
+int x = add(5);
+exit(x);

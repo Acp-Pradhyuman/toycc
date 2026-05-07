@@ -1,0 +1,5 @@
+// Negative test: calling a function that isn't defined.
+// Expected: "undefined variable 'nope'" (treated as an identifier,
+// since it doesn't match any function in the table).
+int x = nope(1);
+exit(x);

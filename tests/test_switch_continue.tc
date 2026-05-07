@@ -1,0 +1,11 @@
+// continue inside switch applies to the enclosing for-loop, not the
+// switch. For i==2 we hit continue → skips the printf → loop resumes
+// at i=3. Expected output: "0 1 3 4 \n".
+for (int i = 0; i < 5; i += 1) {
+    switch (i) {
+        case 2: continue;
+        default: printf("%d ", i); break;
+    }
+}
+printf("\n");
+exit(0);

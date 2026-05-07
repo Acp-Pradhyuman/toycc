@@ -1,0 +1,6 @@
+// Negative test: unbounded recursion. Expected error "call depth
+// exceeded" with exit code 1.
+int rec(int n) {
+    return rec(n + 1);
+}
+exit(rec(0));

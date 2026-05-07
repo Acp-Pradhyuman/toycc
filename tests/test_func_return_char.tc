@@ -1,0 +1,15 @@
+// char-returning function. Internally stored as int (65 = 'A'), but
+// the declared type is char.
+char first_letter() {
+    return 'A';
+}
+
+char next(char c) {
+    return c + 1;
+}
+
+char a = first_letter();
+char b = next(a);
+char c = next(b);
+printf("%c%c%c\n", a, b, c);   // ABC
+exit(c);                       // exit code 67 ('C')

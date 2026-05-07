@@ -1,0 +1,9 @@
+// No break after case 1: execution falls through into case 2's body.
+// Expected: "one\n" then "two\n" (but NOT "three\n" — case 2 has break).
+int x = 1;
+switch (x) {
+    case 1: printf("one\n");
+    case 2: printf("two\n"); break;
+    case 3: printf("three\n"); break;
+}
+exit(0);

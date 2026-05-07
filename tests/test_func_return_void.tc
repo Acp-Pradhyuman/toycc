@@ -1,0 +1,31 @@
+// void-returning function. Called as a statement, not an expression.
+// A bare `return;` inside is valid; a `return <expr>;` would be an error.
+void greet() {
+    printf("hello\n");
+}
+
+void print_n_times(int word_id, int n) {
+    for (int i = 0; i < n; i += 1) {
+        if (word_id == 1) {
+            printf("hi ");
+        } else {
+            printf("bye ");
+        }
+    }
+    printf("\n");
+}
+
+// Void with early return; (still legal — bare return with no value).
+void maybe_print(int flag) {
+    if (flag == 0) {
+        return;
+    }
+    printf("flag was set\n");
+}
+
+greet();
+print_n_times(1, 3);
+print_n_times(2, 2);
+maybe_print(0);           // should print nothing
+maybe_print(1);           // should print "flag was set"
+exit(0);

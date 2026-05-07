@@ -1,0 +1,7 @@
+// Negative test: void function returning a value is a type error.
+// Expected: "void function 'bad' cannot return a value".
+void bad() {
+    return 42;
+}
+bad();
+exit(0);

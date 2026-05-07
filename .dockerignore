@@ -1,0 +1,15 @@
+# Keep the Docker build context small and avoid copying host-built binaries
+# into the builder container (they'd get wiped by `make clean` anyway).
+build/
+generated
+generated.o
+generated.asm
+test
+test.o
+test.asm
+.git/
+.vscode/
+src/copy/
+notes.txt
+notes2.txt
+hf-space/

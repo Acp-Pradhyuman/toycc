@@ -1,0 +1,8 @@
+// No case matches 99 — fall to default.
+int x = 99;
+switch (x) {
+    case 1: printf("one\n"); break;
+    case 2: printf("two\n"); break;
+    default: printf("default\n"); break;
+}
+exit(0);

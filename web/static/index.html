@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>toycc — online compiler</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 Oxygen, Ubuntu, Cantarell, sans-serif;
+    background: #1e1e1e; color: #d4d4d4;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: #252526; border-bottom: 1px solid #333;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 500; }
+  header .subtitle { color: #888; font-size: 12px; margin-left: 10px; }
+  header a { color: #4fc1ff; text-decoration: none; font-size: 13px; }
+  #run {
+    background: #0e639c; color: white; border: 0; padding: 6px 14px;
+    font-size: 13px; border-radius: 2px; cursor: pointer;
+  }
+  #run:hover { background: #1177bb; }
+  #run:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  main {
+    display: flex; height: calc(100vh - 45px);
+  }
+  #left  { width: 55%; height: 100%; }
+  #right { width: 45%; height: 100%; display: flex; flex-direction: column;
+           background: #1e1e1e; border-left: 1px solid #333; }
+
+  .tabs {
+    display: flex; background: #252526; border-bottom: 1px solid #333;
+  }
+  .tab {
+    padding: 8px 16px; cursor: pointer; font-size: 12px;
+    color: #ccc; border-right: 1px solid #333;
+  }
+  .tab.active { background: #1e1e1e; color: white; border-bottom: 2px solid #0e639c; }
+
+  .pane { flex: 1; overflow: auto; padding: 12px; display: none; }
+  .pane.active { display: block; }
+  .pane pre {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  }
+
+  .status {
+    padding: 6px 12px; font-size: 12px; background: #252526;
+    border-top: 1px solid #333;
+  }
+  .status.ok   { color: #89d185; }
+  .status.err  { color: #f48771; }
+  .status.idle { color: #888; }
+
+  .empty { color: #666; font-style: italic; }
+  .error-line { color: #f48771; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>toycc <span class="subtitle">— online compiler (C subset → x86_64)</span></h1>
+  </div>
+  <div style="display:flex;gap:12px;align-items:center;">
+    <a href="https://github.com/Acp-Pradhyuman/toycc" target="_blank" rel="noopener">GitHub</a>
+    <button id="run">▶ Compile &amp; Run</button>
+  </div>
+</header>
+
+<main>
+  <div id="left"></div>
+
+  <div id="right">
+    <div class="tabs">
+      <div class="tab active" data-pane="pane-stdout">Output</div>
+      <div class="tab" data-pane="pane-asm">Assembly</div>
+      <div class="tab" data-pane="pane-diag">Compiler</div>
+    </div>
+
+    <div id="pane-stdout" class="pane active">
+      <pre class="empty">(click Compile &amp; Run)</pre>
+    </div>
+    <div id="pane-asm" class="pane">
+      <pre class="empty">(no assembly yet)</pre>
+    </div>
+    <div id="pane-diag" class="pane">
+      <pre class="empty">(no compiler output)</pre>
+    </div>
+
+    <div id="status" class="status idle">idle</div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+<script>
+  const DEFAULT_SRC =
+`// toycc sample program: compile-time fibonacci, prints via printf.
+int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+for (int i = 0; i < 10; i += 1) {
+    printf("fib(%d) = %d\\n", i, fib(i));
+}
+exit(0);
+`;
+
+  // --- Editor ---
+  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' } });
+  require(['vs/editor/editor.main'], function () {
+    window.editor = monaco.editor.create(document.getElementById('left'), {
+      value: DEFAULT_SRC,
+      language: 'c',       // C syntax is close enough
+      theme: 'vs-dark',
+      automaticLayout: true,
+      fontSize: 14,
+      minimap: { enabled: false },
+    });
+  });
+
+  // --- Tabs ---
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.pane').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      document.getElementById(t.dataset.pane).classList.add('active');
+    });
+  });
+
+  // --- Run ---
+  const btn     = document.getElementById('run');
+  const status  = document.getElementById('status');
+  const out     = document.querySelector('#pane-stdout pre');
+  const asm     = document.querySelector('#pane-asm pre');
+  const diag    = document.querySelector('#pane-diag pre');
+
+  function setStatus(kind, msg) {
+    status.className = 'status ' + kind;
+    status.textContent = msg;
+  }
+
+  async function compileAndRun() {
+    if (!window.editor) return;
+    const source = window.editor.getValue();
+
+    btn.disabled = true;
+    setStatus('idle', 'compiling…');
+    out.textContent  = '';  out.className = '';
+    asm.textContent  = '';  asm.className = '';
+    diag.textContent = '';  diag.className = '';
+
+    let res;
+    try {
+      const r = await fetch('/compile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source }),
+      });
+      res = await r.json();
+    } catch (e) {
+      setStatus('err', 'request failed: ' + e.message);
+      btn.disabled = false;
+      return;
+    }
+
+    if (res.error) {
+      setStatus('err', res.error);
+      btn.disabled = false;
+      return;
+    }
+
+    asm.textContent = res.asm || '';
+    if (!res.asm) asm.className = 'empty';
+
+    diag.textContent = res.compile_stderr || '';
+    if (!res.compile_stderr) {
+      diag.textContent = '(no compiler diagnostics)';
+      diag.className = 'empty';
+    }
+
+    if (!res.compile_ok) {
+      setStatus('err', 'compile failed');
+      out.textContent = '(program did not compile — see Compiler tab)';
+      out.className = 'empty';
+      // Auto-switch to Compiler tab on error.
+      document.querySelector('[data-pane="pane-diag"]').click();
+    } else if (res.timed_out) {
+      setStatus('err', 'timed out after 5s');
+      out.textContent = res.stdout + '\n[[ timed out ]]';
+    } else {
+      const tag = (res.exit_code === 0)
+        ? `ok (exit ${res.exit_code})`
+        : `exit ${res.exit_code}`;
+      setStatus(res.exit_code === 0 ? 'ok' : 'err', tag);
+      out.textContent = res.stdout + (res.stderr ? '\n--- stderr ---\n' + res.stderr : '');
+      if (!res.stdout && !res.stderr) {
+        out.textContent = '(no output)';
+        out.className = 'empty';
+      }
+    }
+
+    btn.disabled = false;
+  }
+
+  btn.addEventListener('click', compileAndRun);
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault(); compileAndRun();
+    }
+  });
+</script>
+</body>
+</html>
