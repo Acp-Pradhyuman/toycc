@@ -2,6 +2,8 @@
 
 A hobby C-subset compiler project — built in pure C, targeting **x86_64 assembly** via **NASM**. The `tc` compiler includes a complete pipeline: **Lexing**, **Parsing**, **Semantic Analysis**, **Partial Evaluation**, and **Assembly Code Generation**.
 
+Try the compiler online: https://huggingface.co/spaces/Acp-Pradhyuman/toycc
+
 ### Supported language surface
 
 - **Types:** `int`, `char`, `void`, `const`
